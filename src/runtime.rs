@@ -536,10 +536,9 @@ pub fn call_builtin_op(op: RtBuiltin, args: &[Value]) -> Result<Value> {
             match &args[0] {
                 Value::Str(s) if s.as_str() == "match failed" => Ok(Value::Null),
                 Value::Str(s) => bail!("{}", s.as_str()),
-                other => bail!(
-                    "__jqerror__:{}",
-                    crate::value::value_to_json_precise(other),
-                ),
+                // Non-string payloads rethrow as a typed `error(value)` so
+                // a downstream catch recovers the value losslessly (#1034).
+                other => Err(crate::signal::ErrorValue::raise(other.clone())),
             }
         }
         RtBuiltin::First | RtBuiltin::Last | RtBuiltin::Nth | RtBuiltin::Range | RtBuiltin::While | RtBuiltin::Until | RtBuiltin::Repeat | RtBuiltin::Recurse

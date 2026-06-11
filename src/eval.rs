@@ -2555,17 +2555,14 @@ pub fn eval(
                         let v = take_error_payload(ev);
                         return eval(catch_expr, v, env, cb);
                     }
-                    let msg = format!("{}", e);
                     // halt / halt_error are non-recoverable: jq lets them
                     // propagate past `try ... catch` so the process exits with
                     // the requested code (#182).
                     if e.downcast_ref::<crate::signal::HaltSignal>().is_some() { return Err(e); }
-                    let catch_val = if let Some(json) = msg.strip_prefix("__jqerror__:") {
-                        crate::value::json_to_value(json).unwrap_or(Value::from_str(&msg))
-                    } else {
-                        Value::from_str(&msg)
-                    };
-                    eval(catch_expr, catch_val, env, cb)
+                    // Every `error(value)` raise is a typed `ErrorValue`
+                    // (downcast above), so what remains here is a plain
+                    // message error — bind its text directly (#1034).
+                    eval(catch_expr, Value::from_str(&format!("{}", e)), env, cb)
                 }
             }
         }
@@ -3525,7 +3522,7 @@ pub fn eval(
                         // true for NaN and it takes the negative-count error
                         // path rather than acting as an unbounded count (#813).
                         if n < 0.0 || n.is_nan() {
-                            bail!("__jqerror__:\"limit doesn't support negative count\"");
+                            return Err(ErrorValue::raise(Value::from_str("limit doesn't support negative count")));
                         }
                         if n == 0.0 { return Ok(true); } // 0.0 and -0.0 → empty
                         let mut emitted: i64 = 0;
@@ -3552,7 +3549,7 @@ pub fn eval(
                     // so `$n < 0` is true for these and they take jq's
                     // "negative count" branch (#539).
                     Value::Null | Value::True | Value::False => {
-                        bail!("__jqerror__:\"limit doesn't support negative count\"");
+                        return Err(ErrorValue::raise(Value::from_str("limit doesn't support negative count")));
                     }
                     // String / array / object surface jq's `$n - 1`
                     // arithmetic error from the limit reduce. jq computes that
@@ -3564,17 +3561,14 @@ pub fn eval(
                             "{} and number (1) cannot be subtracted",
                             crate::runtime::errdesc_pub(other),
                         );
-                        let err = format!(
-                            "__jqerror__:{}",
-                            crate::value::value_to_json_precise(&Value::from_string(msg)),
-                        );
+                        let err_val = Value::from_string(msg);
                         let mut yielded = false;
                         eval(generator, input.clone(), env, &mut |_val| {
                             yielded = true;
                             Ok(false)
                         })?;
                         if yielded {
-                            bail!("{}", err);
+                            return Err(ErrorValue::raise(err_val));
                         }
                         Ok(true)
                     }
@@ -5997,7 +5991,6 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
             match result {
                 Ok(cont) => Ok(cont),
                 Err(e) => {
-                    let msg = format!("{}", e);
                     // halt / halt_error are non-recoverable: jq lets them
                     // propagate past `try ... catch` so the process exits with
                     // the requested code (#182).
@@ -6026,12 +6019,10 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                         let v = take_error_payload(ev);
                         return eval_path_catch(catch_expr, v, &input, env, cb);
                     }
-                    let catch_val = if let Some(json) = msg.strip_prefix("__jqerror__:") {
-                        crate::value::json_to_value(json).unwrap_or(Value::from_str(&msg))
-                    } else {
-                        Value::from_str(&msg)
-                    };
-                    eval_path_catch(catch_expr, catch_val, &input, env, cb)
+                    // Every `error(value)` raise is a typed `ErrorValue`
+                    // (downcast above), so what remains here is a plain
+                    // message error — bind its text directly (#1034).
+                    eval_path_catch(catch_expr, Value::from_str(&format!("{}", e)), &input, env, cb)
                 }
             }
         }
@@ -6146,7 +6137,7 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                 let n = match &cv {
                     Value::Num(n, _) => *n,
                     Value::Null | Value::True | Value::False => {
-                        bail!("__jqerror__:\"limit doesn't support negative count\"");
+                        return Err(ErrorValue::raise(Value::from_str("limit doesn't support negative count")));
                     }
                     // A string/array/object count surfaces jq's `$n - 1`
                     // arithmetic error lazily — only when the generator yields
@@ -6157,23 +6148,20 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                             "{} and number (1) cannot be subtracted",
                             crate::runtime::errdesc_pub(other),
                         );
-                        let err = format!(
-                            "__jqerror__:{}",
-                            crate::value::value_to_json_precise(&Value::from_string(msg)),
-                        );
+                        let err_val = Value::from_string(msg);
                         let mut yielded = false;
                         eval_path(generator, input.clone(), env, &mut |_p| {
                             yielded = true;
                             Ok(false)
                         })?;
                         if yielded {
-                            bail!("{}", err);
+                            return Err(ErrorValue::raise(err_val));
                         }
                         return Ok(true);
                     }
                 };
                 if n < 0.0 || n.is_nan() {
-                    bail!("__jqerror__:\"limit doesn't support negative count\"");
+                    return Err(ErrorValue::raise(Value::from_str("limit doesn't support negative count")));
                 }
                 if n == 0.0 { return Ok(true); }
                 let mut emitted: i64 = 0;
@@ -7847,11 +7835,11 @@ fn eval_skip(exp: &Expr, nval: &Value, input: Value, env: &EnvRef, cb: &mut dyn 
         Value::Num(n, _) => {
             let n = *n as i64;
             if n < 0 {
-                return Err(anyhow::anyhow!("__jqerror__:\"skip doesn't support negative count\""));
+                return Err(ErrorValue::raise(Value::from_str("skip doesn't support negative count")));
             }
             n
         }
-        _ => return Err(anyhow::anyhow!("__jqerror__:\"skip count must be a number\"")),
+        _ => return Err(ErrorValue::raise(Value::from_str("skip count must be a number"))),
     };
     let mut count = 0i64;
     eval(exp, input, env, &mut |val| {
@@ -8303,12 +8291,14 @@ pub fn execute_ir_with_libs(expr: &Expr, input: Value, funcs: Vec<CompiledFunc>,
             if e.downcast_ref::<BreakError>().is_some() {
                 Ok(outputs)
             } else {
-                let msg = format!("{}", e);
-                // Report error to stderr but still return collected outputs
-                if let Some(json) = msg.strip_prefix("__jqerror__:") {
-                    eprintln!("jq: error: {}", json);
+                // Report error to stderr but still return collected
+                // outputs. A typed `error(value)` payload prints as its
+                // JSON (byte-identical to the legacy sentinel text, #1034).
+                if let Some(ev) = e.downcast_ref::<ErrorValue>() {
+                    let v = take_error_payload(ev);
+                    eprintln!("jq: error: {}", crate::value::value_to_json_precise(&v));
                 } else {
-                    eprintln!("jq: error: {}", msg);
+                    eprintln!("jq: error: {}", e);
                 }
                 Ok(outputs)
             }
