@@ -179,6 +179,28 @@ gate を通れば tree-walking eval ではなく JitOp interpreter で実行さ�
 `JQJIT_TRACE=1` の generic fallback ラベルは `jit` / `jitop` / `eval` の
 3 値（`tests/jitop_routing.rs` がルーティング決定をガードする）。
 
+#### #1059 endgame: 実行モデルの最終地図（2026-06 完了）
+
+#1059（共有 lowering への実行統一）は次の状態で完了:
+
+1. **カバレッジ**: regression + differential corpora の全 filter が共有
+   lowering（flatten）でコンパイル可能。forced-jitop の eval-bail は
+   **131 → 0**（PR #1103-#1110）。exotic ノードは `DelegateGen` で eval に
+   streaming 委譲される
+2. **default routing**: fast path 群 → JIT（cranelift / jitop-interp）→ eval
+   の優先順。委譲込みプログラムも routing 対象（PR #1111 の flip）。ただし
+   delegate-dominant（native ops ≤16）/ interleaved-IO / loop 内 delegate は
+   A/B・正しさの根拠で eval 維持
+3. **eval の役割**: 「独立した第二実装」から「委譲先エンジン + A/B で勝つ
+   class の routing 先」へ縮小。semantics の正本は flatten 側にあり、
+   eval との一致は selfdiff（default vs eval）+ 3-backend sweep が常時検証
+4. **self-diff の主役**: `tests/selfdiff_jitop_backend.rs`（jitop-interp vs
+   cranelift — 同一 op 列の真の backend diff）。`selfdiff_jit_interp.rs`
+   （default vs eval）は委譲経路と routing 境界の検証として存続
+5. **既知の残骸**: forced 系の eager `inputs` 収集による
+   `[inputs as $x | input_line_number]` 乖離（default は routing guard で
+   回避、forced のみ残存・未修正）
+
 #### streaming eval delegate（#1059 Phase 3 / `JitOp::DelegateGen`）
 
 flatten 不能なサブツリーは、ノード単位で eval に **streaming 委譲**して
@@ -201,7 +223,9 @@ downstream early-stop が保たれる（旧 eager delegate の #1085 hang は
   collect 深度**（limit 配下の合成 collect 内）は budget が数えられないので
   従来どおり bail。Limit arm の pre-check は placeholder limit_state を
   立てて probe する（probe/real の文脈ずれ防止）
-- サブツリーに `break`（委譲境界を越える break は label に戻れない）
+- サブツリーに **free な** `break`（対象 label が委譲境界の外 — JIT label に
+  戻れない）。label binder が委譲式内にある break は eval 内で完結するので
+  委譲可（#1059 PR-G、`expr_free_breaks`）
 - **push mode（collect 文脈）で無限になり得るサブツリー**
   （Repeat/While/Until/Recurse、および再帰 def の `FuncCall`）— pipe
   fallback の collect は eager なので eval が lazy に切る stream が hang

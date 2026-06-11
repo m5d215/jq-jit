@@ -7,6 +7,13 @@
 //! the JIT path and the interpreter path inside jq-jit drifting apart on the
 //! same filter — without depending on an external `jq` binary.
 //!
+//! Post-#1059 role: the shared JitOp lowering covers the full corpus and
+//! `tests/selfdiff_jitop_backend.rs` is the primary backend diff
+//! (jitop-interp vs Cranelift over identical op sequences). Eval survives
+//! as the delegated-op engine and as the A/B-preferred route for
+//! delegate-dominant / interleaved-IO programs — this harness pins those
+//! delegation and routing boundaries against eval semantics.
+//!
 //! The runtime knob is `JQJIT_FORCE_INTERPRETER=1`: the binary then disables
 //! all raw-byte fast paths, skips JIT compilation, and routes
 //! `Filter::execute` / `Filter::execute_cb` through the generic interpreter
