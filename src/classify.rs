@@ -9192,7 +9192,9 @@ impl Filter {
         if collect_input_fields(&self.simplified, &mut fields) {
             fields.sort();
             fields.dedup();
-            if !fields.is_empty() {
+            // The projecting parser tracks found keys in a u64 bitset; past 64
+            // distinct fields the missing-field backfill could duplicate keys.
+            if !fields.is_empty() && fields.len() <= 64 {
                 return Some(fields);
             }
         }
@@ -9275,7 +9277,7 @@ fn collect_comma_fields(expr: &crate::ir::Expr, fields: &mut Vec<String>) -> boo
 }
 
 fn collect_input_fields(expr: &crate::ir::Expr, fields: &mut Vec<String>) -> bool {
-    use crate::ir::{Expr, Literal};
+    use crate::ir::{Expr, Literal, StringPart};
     match expr {
         // Accessing a specific field of input: .foo
         Expr::Index { expr: base, key } => {
@@ -9297,12 +9299,38 @@ fn collect_input_fields(expr: &crate::ir::Expr, fields: &mut Vec<String>) -> boo
             }
             collect_input_fields(base, fields) && collect_input_fields(key, fields)
         }
-        // Bare input access — needs full object
+        // Bare input access — the record itself reaches the output (or an
+        // expression we cannot see through). This arm is the safety anchor:
+        // every other arm may only pass when its outputs are literals or
+        // fully-parsed derived values, never the (projected) record.
         Expr::Input => false,
-        // Literals and variables don't access input
+        // Literals, variables and input-independent leaves
         Expr::Literal(_) | Expr::LoadVar { .. } => true,
-        // Pipe: both sides
-        Expr::Pipe { left, right } => collect_input_fields(left, fields) && collect_input_fields(right, fields),
+        Expr::Empty | Expr::Not | Expr::Env | Expr::Loc { .. } | Expr::Builtins => true,
+        // Pipe: when the left side passes the record through unchanged (bare
+        // `.`, or the `select(cond)` desugar `if cond then . else empty end`),
+        // the right side still reads top-level fields — walk it strictly.
+        // Otherwise the left side's outputs are complete derived values, so
+        // the right side needs no field collection at all; it only must not
+        // touch the input stream.
+        Expr::Pipe { left, right } => {
+            if pipe_passes_record_through(left, fields) {
+                collect_input_fields(right, fields)
+            } else {
+                collect_input_fields(left, fields) && projection_stream_safe(right)
+            }
+        }
+        Expr::Comma { left, right } => {
+            collect_input_fields(left, fields) && collect_input_fields(right, fields)
+        }
+        // Array construct and iteration over a derived value. Bare `.[]`
+        // (`Each { input_expr: Input }`) is anchored by the Input arm.
+        // NOTE: `Recurse { input_expr }` must NOT get this treatment:
+        // `recurse(f)` yields the record itself before f's outputs.
+        Expr::Collect { generator } => collect_input_fields(generator, fields),
+        Expr::Each { input_expr } | Expr::EachOpt { input_expr } => {
+            collect_input_fields(input_expr, fields)
+        }
         // Object construct: check keys and values
         Expr::ObjectConstruct { pairs } => {
             pairs.iter().all(|(k, v)| collect_input_fields(k, fields) && collect_input_fields(v, fields))
@@ -9315,12 +9343,222 @@ fn collect_input_fields(expr: &crate::ir::Expr, fields: &mut Vec<String>) -> boo
         Expr::BinOp { lhs, rhs, .. } => collect_input_fields(lhs, fields) && collect_input_fields(rhs, fields),
         Expr::UnaryOp { operand, .. } => collect_input_fields(operand, fields),
         Expr::Negate { operand } => collect_input_fields(operand, fields),
-        Expr::Not => true,
-        // Let binding
+        // Let binding (`e as $x | body` keeps `.` bound to the record in body)
         Expr::LetBinding { value, body, .. } => collect_input_fields(value, fields) && collect_input_fields(body, fields),
         // Select, alternative
         Expr::Alternative { primary, fallback } => collect_input_fields(primary, fields) && collect_input_fields(fallback, fields),
+        // try/catch: the catch body sees the error value, which a strict-
+        // passing try can only build from message strings or derived values —
+        // never the record. The `?//` desugar (restore_dot) re-runs the catch
+        // against the try's input, i.e. the record, so it stays strict.
+        Expr::TryCatch { try_expr, catch_expr, restore_dot } => {
+            collect_input_fields(try_expr, fields)
+                && if *restore_dot {
+                    collect_input_fields(catch_expr, fields)
+                } else {
+                    projection_stream_safe(catch_expr)
+                }
+        }
+        Expr::StringInterpolation { parts } => parts.iter().all(|p| match p {
+            StringPart::Literal(_) => true,
+            StringPart::Expr(e) => collect_input_fields(e, fields),
+        }),
+        Expr::Format { expr, .. } => collect_input_fields(expr, fields),
+        // Slice bounds are evaluated against the same `.` as the sliced expr
+        Expr::Slice { expr, from, to } => {
+            collect_input_fields(expr, fields)
+                && from.as_ref().is_none_or(|e| collect_input_fields(e, fields))
+                && to.as_ref().is_none_or(|e| collect_input_fields(e, fields))
+        }
+        Expr::Limit { count, generator } => {
+            collect_input_fields(count, fields) && collect_input_fields(generator, fields)
+        }
+        Expr::Range { from, to, step } => {
+            collect_input_fields(from, fields)
+                && collect_input_fields(to, fields)
+                && step.as_ref().is_none_or(|e| collect_input_fields(e, fields))
+        }
+        // reduce/foreach: source and init run against the record; update and
+        // extract run against the accumulator/element, which are complete.
+        Expr::Reduce { source, init, update, .. } => {
+            collect_input_fields(source, fields)
+                && collect_input_fields(init, fields)
+                && projection_stream_safe(update)
+        }
+        Expr::Foreach { source, init, update, extract, .. } => {
+            collect_input_fields(source, fields)
+                && collect_input_fields(init, fields)
+                && projection_stream_safe(update)
+                && extract.as_ref().is_none_or(|e| projection_stream_safe(e))
+        }
+        Expr::Label { body, .. } => collect_input_fields(body, fields),
+        Expr::Break { value, .. } => collect_input_fields(value, fields),
+        // all/any predicates run against the generated elements (complete)
+        Expr::AllShort { generator, predicate } | Expr::AnyShort { generator, predicate } => {
+            collect_input_fields(generator, fields) && projection_stream_safe(predicate)
+        }
+        // NOTE: `Debug`/`Stderr` print their expr but pass the record
+        // through, so they stay in the catch-all bail below.
+        // Bare `error` throws the record itself as the error payload
+        Expr::Error { msg } => msg.as_ref().is_some_and(|m| collect_input_fields(m, fields)),
         // Anything else: assume full input needed
         _ => false,
+    }
+}
+
+/// True for pipe left-hand sides that yield the raw record itself (or
+/// nothing): bare `.`, the `select(cond)` desugar (`if cond then . else
+/// empty end`, either branch order), and chains of those. Field reads in
+/// the conditions are collected; the caller then walks the right-hand side
+/// strictly because the record flows into it.
+fn pipe_passes_record_through(expr: &crate::ir::Expr, fields: &mut Vec<String>) -> bool {
+    use crate::ir::Expr;
+    match expr {
+        Expr::Input => true,
+        Expr::IfThenElse { cond, then_branch, else_branch } => {
+            matches!(then_branch.as_ref(), Expr::Input | Expr::Empty)
+                && matches!(else_branch.as_ref(), Expr::Input | Expr::Empty)
+                && collect_input_fields(cond, fields)
+        }
+        Expr::Pipe { left, right } => {
+            pipe_passes_record_through(left, fields) && pipe_passes_record_through(right, fields)
+        }
+        _ => false,
+    }
+}
+
+/// Scan a sub-expression whose `.` is bound to a *derived* (complete) value —
+/// a pipe output, accumulator, generated element or error payload — rather
+/// than the raw top-level record. Such an expression cannot read record
+/// fields, so it needs no field collection; it only must not (a) pull more
+/// records from the host input stream (`input`/`inputs` would observe
+/// projected records), (b) read parser bookkeeping the projecting scanner is
+/// not guaranteed to maintain (`input_line_number`/`input_filename`), or
+/// (c) call an opaque function whose body this scan cannot see (recursive
+/// user functions survive beta-reduction). The match is exhaustive on
+/// purpose: a new `Expr` variant must be reviewed against (a)–(c) here.
+fn projection_stream_safe(expr: &crate::ir::Expr) -> bool {
+    use crate::ir::{BuiltinOp, Expr, StringPart};
+    match expr {
+        Expr::ReadInput | Expr::ReadInputs | Expr::FuncCall { .. } => false,
+        Expr::CallBuiltin { op, args } => {
+            !matches!(op, BuiltinOp::InputFilename | BuiltinOp::InputLineNumber)
+                && args.iter().all(projection_stream_safe)
+        }
+        Expr::Input
+        | Expr::Literal(_)
+        | Expr::LoadVar { .. }
+        | Expr::Empty
+        | Expr::Not
+        | Expr::Loc { .. }
+        | Expr::Env
+        | Expr::Builtins
+        | Expr::ModuleMeta
+        | Expr::GenLabel => true,
+        Expr::BinOp { lhs, rhs, .. } => projection_stream_safe(lhs) && projection_stream_safe(rhs),
+        Expr::UnaryOp { operand, .. } | Expr::Negate { operand } => projection_stream_safe(operand),
+        Expr::Index { expr, key } | Expr::IndexOpt { expr, key } => {
+            projection_stream_safe(expr) && projection_stream_safe(key)
+        }
+        Expr::Pipe { left, right } | Expr::Comma { left, right } => {
+            projection_stream_safe(left) && projection_stream_safe(right)
+        }
+        Expr::IfThenElse { cond, then_branch, else_branch } => {
+            projection_stream_safe(cond)
+                && projection_stream_safe(then_branch)
+                && projection_stream_safe(else_branch)
+        }
+        Expr::TryCatch { try_expr, catch_expr, .. } => {
+            projection_stream_safe(try_expr) && projection_stream_safe(catch_expr)
+        }
+        Expr::Each { input_expr } | Expr::EachOpt { input_expr } | Expr::Recurse { input_expr } => {
+            projection_stream_safe(input_expr)
+        }
+        Expr::LetBinding { value, body, .. } => {
+            projection_stream_safe(value) && projection_stream_safe(body)
+        }
+        Expr::Reduce { source, init, update, .. } => {
+            projection_stream_safe(source)
+                && projection_stream_safe(init)
+                && projection_stream_safe(update)
+        }
+        Expr::Foreach { source, init, update, extract, .. } => {
+            projection_stream_safe(source)
+                && projection_stream_safe(init)
+                && projection_stream_safe(update)
+                && extract.as_ref().is_none_or(|e| projection_stream_safe(e))
+        }
+        Expr::Collect { generator } => projection_stream_safe(generator),
+        Expr::ObjectConstruct { pairs } => pairs
+            .iter()
+            .all(|(k, v)| projection_stream_safe(k) && projection_stream_safe(v)),
+        Expr::Alternative { primary, fallback } => {
+            projection_stream_safe(primary) && projection_stream_safe(fallback)
+        }
+        Expr::Range { from, to, step } => {
+            projection_stream_safe(from)
+                && projection_stream_safe(to)
+                && step.as_ref().is_none_or(|e| projection_stream_safe(e))
+        }
+        Expr::Label { body, .. } => projection_stream_safe(body),
+        Expr::Break { value, .. } => projection_stream_safe(value),
+        Expr::Update { path_expr, update_expr } => {
+            projection_stream_safe(path_expr) && projection_stream_safe(update_expr)
+        }
+        Expr::Assign { path_expr, value_expr } | Expr::Mutate { path_expr, value_expr, .. } => {
+            projection_stream_safe(path_expr) && projection_stream_safe(value_expr)
+        }
+        Expr::PathExpr { expr } => projection_stream_safe(expr),
+        Expr::SetPath { path, value } => {
+            projection_stream_safe(path) && projection_stream_safe(value)
+        }
+        Expr::GetPath { path } => projection_stream_safe(path),
+        Expr::DelPaths { paths } => projection_stream_safe(paths),
+        Expr::StringInterpolation { parts } => parts.iter().all(|p| match p {
+            StringPart::Literal(_) => true,
+            StringPart::Expr(e) => projection_stream_safe(e),
+        }),
+        Expr::Limit { count, generator } => {
+            projection_stream_safe(count) && projection_stream_safe(generator)
+        }
+        Expr::While { cond, update } | Expr::Until { cond, update } => {
+            projection_stream_safe(cond) && projection_stream_safe(update)
+        }
+        Expr::Repeat { update } => projection_stream_safe(update),
+        Expr::AllShort { generator, predicate } | Expr::AnyShort { generator, predicate } => {
+            projection_stream_safe(generator) && projection_stream_safe(predicate)
+        }
+        Expr::Error { msg } => msg.as_ref().is_none_or(|m| projection_stream_safe(m)),
+        Expr::Format { expr, .. } => projection_stream_safe(expr),
+        Expr::ClosureOp { input_expr, key_expr, .. } => {
+            projection_stream_safe(input_expr) && projection_stream_safe(key_expr)
+        }
+        Expr::RegexTest { input_expr, re, flags }
+        | Expr::RegexMatch { input_expr, re, flags }
+        | Expr::RegexCapture { input_expr, re, flags }
+        | Expr::RegexScan { input_expr, re, flags } => {
+            projection_stream_safe(input_expr)
+                && projection_stream_safe(re)
+                && projection_stream_safe(flags)
+        }
+        Expr::RegexSub { input_expr, re, tostr, flags }
+        | Expr::RegexGsub { input_expr, re, tostr, flags } => {
+            projection_stream_safe(input_expr)
+                && projection_stream_safe(re)
+                && projection_stream_safe(tostr)
+                && projection_stream_safe(flags)
+        }
+        Expr::AlternativeDestructure { alternatives } => {
+            alternatives.iter().all(projection_stream_safe)
+        }
+        Expr::Slice { expr, from, to } => {
+            projection_stream_safe(expr)
+                && from.as_ref().is_none_or(|e| projection_stream_safe(e))
+                && to.as_ref().is_none_or(|e| projection_stream_safe(e))
+        }
+        Expr::Debug { expr } | Expr::Stderr { expr } => projection_stream_safe(expr),
+        Expr::Memoize { key, body, .. } => {
+            key.as_ref().is_none_or(|k| projection_stream_safe(k)) && projection_stream_safe(body)
+        }
     }
 }

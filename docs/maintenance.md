@@ -564,6 +564,39 @@ object / 静的 comma-list の array、ネスト可）は、`jit.rs::build_emit_
   `tests/contract_emit_fusion.rs` が両 backend の byte parity・mixed
   retreat・record-atomicity を pin する。
 
+### Projection pushdown（#251 / #1055 `needed_input_fields`）の契約
+
+raw fast path が一つもマッチしなかった filter は、
+`classify.rs::needed_input_fields()` が「読む top-level field の静的集合」を
+導出できれば、host が `json_stream_project` で **その field だけ** を
+materialize する（他 field は `skip_json_value` で素通し、欠落 field は
+`Null` で backfill、重複キーは last-wins）。projected `Value` はそのまま
+generic 実行（JIT / eval）に流れるので、emit 側に別実装は無い。
+
+- **安全アンカー**: strict walk（`collect_input_fields`）で bare `Input`
+  は常に `false`。各 arm は「出力が literal か完全 parse 済みの派生値で、
+  record そのものを出力し得ない」場合のみ通してよい。**暗黙に record を
+  passthrough する node に注意**: `recurse(f)`（先頭で `.` を yield）、
+  `debug(msg)` / `stderr`（expr は印字するだけで `.` を通す）、引数なし
+  `error`（`.` を error payload に積む）は strict で必ず bail。
+- **pipe 右辺は集合不要**: `Pipe { left, right }` で left が strict を通れば
+  left の出力は完全な派生値なので、right は field 収集なしで
+  `projection_stream_safe`（`input` / `inputs` / `input_line_number` /
+  `input_filename` / 不透明 `FuncCall` を含まない）だけ満たせばよい。
+  逆に left が record を素通しする形（bare `.`、`select(cond)` desugar =
+  branch が `Input` / `Empty` の `IfThenElse`）なら right も strict で歩く
+  （`pipe_passes_record_through`）。
+- **`Expr` variant を増やしたら両 walk を見直す**:
+  `projection_stream_safe` は意図的に wildcard なしの exhaustive match
+  なのでコンパイルが落ちて気付ける。strict 側は `_ => false` で安全側。
+- **64 field 上限**: projecting parser の found 追跡は u64 bitset。
+  `needed_input_fields` は 65 個以上で `None` を返す（超えると欠落
+  backfill が重複キーを作り得る）。
+- 検証は `tests/contract_projection.rs`（projected vs full parse の
+  出力・エラー同値、refuse 一覧、bitset 上限）と、PR 時の
+  projection on/off 全 group sweep（regression + corpus、`-c -L
+  tests/modules` で stdout+exit 比較）。
+
 ### `paths` / `paths(f)` は root を落とす
 
 jq の `paths` は `path(..) | select(length > 0)`。scalar 入力で空 path `[]` を yield しない。派生する `paths(f)` も同じ不変性を持つ。rewrite を書き直す時は `length > 0` の guard を必ず最後に挟む。
