@@ -14208,3 +14208,23 @@ try .x catch "err"
 [foreach .x[] as $v (0; . + $v)]
 {"x":[1,2,3],"pad":null}
 [1,3,6]
+
+# #1030: function inlining shares the callee body Rc — no-param nested defs
+def f: .+1; def g: f|f|f; g|g
+0
+6
+
+# #1030: param def inlining across multiple call sites
+def addn(x): . + x; addn(10) | addn(20)
+5
+35
+
+# #1030: recursive def (inline-exempt path) stays correct under shared bodies
+def r: if . <= 0 then 0 else . + (. - 1 | r) end; r
+5
+15
+
+# #1030: higher-order def inlining a no-param def at multiple sites
+def dbl: . * 2; def f(g): [.[] | g]; f(dbl) | f(dbl)
+[1,2,3]
+[4,8,12]

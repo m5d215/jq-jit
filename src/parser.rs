@@ -98,7 +98,7 @@ impl Scope {
         self.compiled_funcs.push(CompiledFunc {
             name: Some(name.to_string()),
             nargs,
-            body,
+            body: Rc::new(body),
             param_vars,
         });
         func_id
@@ -113,7 +113,7 @@ impl Scope {
         self.compiled_funcs.push(CompiledFunc {
             name: None,
             nargs,
-            body,
+            body: Rc::new(body),
             param_vars,
         });
         func_id
@@ -121,7 +121,7 @@ impl Scope {
 
     fn update_func_body(&mut self, func_id: FuncId, body: Expr, param_vars: Vec<VarIdx>) {
         if let Some(f) = self.compiled_funcs.get_mut(func_id.idx()) {
-            f.body = body;
+            f.body = Rc::new(body);
             f.param_vars = param_vars;
         }
     }
@@ -1625,7 +1625,7 @@ impl Parser {
         // Second pass: remap func_ids in bodies and install them
         for (mod_func_id, new_func_id) in &func_id_map {
             let func = mod_parser.scope.compiled_funcs[mod_func_id.idx()].clone();
-            let mut body = remap_func_ids(func.body, &func_id_map);
+            let mut body = remap_func_ids(func.body.as_ref().clone(), &func_id_map);
             // Wrap function body with data import bindings (in reverse order)
             for (var_idx, value_expr) in data_bindings.iter().rev() {
                 body = Expr::LetBinding {

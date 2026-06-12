@@ -1058,9 +1058,14 @@ impl Flattener {
                     self.has_unresolved_recursion = true;
                     return expr.clone();
                 }
-                let func = self.funcs[func_id.idx()].clone();
-                let body = if !func.param_vars.is_empty() && !args.is_empty() {
-                    crate::eval::substitute_params(&func.body, &func.param_vars, args)
+                // Borrow the callee instead of cloning the whole CompiledFunc
+                // (its `body` Rc bump is cheap, but the old `.clone()` also
+                // deep-copied the body once more). With params we still build a
+                // substituted tree; without, we share the body Rc and recurse
+                // on it directly — zero deep clones at the call site (#1030).
+                let func = &self.funcs[func_id.idx()];
+                let body: Rc<Expr> = if !func.param_vars.is_empty() && !args.is_empty() {
+                    Rc::new(crate::eval::substitute_params(&func.body, &func.param_vars, args))
                 } else {
                     func.body.clone()
                 };
@@ -2959,9 +2964,10 @@ impl Flattener {
             Expr::FuncCall { func_id, args } if func_id.idx() < self.funcs.len()
                 && !self.expanding_funcs.contains(func_id) => {
                 self.expanding_funcs.insert(*func_id);
-                let func = &self.funcs[func_id.idx()].clone();
-                let body = if !func.param_vars.is_empty() && !args.is_empty() {
-                    crate::eval::substitute_params(&func.body, &func.param_vars, args)
+                // Share the callee body Rc instead of deep-cloning it (#1030).
+                let func = &self.funcs[func_id.idx()];
+                let body: Rc<Expr> = if !func.param_vars.is_empty() && !args.is_empty() {
+                    Rc::new(crate::eval::substitute_params(&func.body, &func.param_vars, args))
                 } else {
                     func.body.clone()
                 };
@@ -4342,9 +4348,10 @@ impl Flattener {
                 // Detect recursive function calls — not JIT-compilable
                 if self.expanding_funcs.contains(func_id) { return false; }
                 self.expanding_funcs.insert(*func_id);
-                let func = &self.funcs[func_id.idx()].clone();
-                let body = if !func.param_vars.is_empty() && !args.is_empty() {
-                    crate::eval::substitute_params(&func.body, &func.param_vars, args)
+                // Share the callee body Rc instead of deep-cloning it (#1030).
+                let func = &self.funcs[func_id.idx()];
+                let body: Rc<Expr> = if !func.param_vars.is_empty() && !args.is_empty() {
+                    Rc::new(crate::eval::substitute_params(&func.body, &func.param_vars, args))
                 } else {
                     func.body.clone()
                 };
