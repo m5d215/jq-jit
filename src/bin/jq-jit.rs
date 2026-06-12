@@ -921,6 +921,20 @@ fn push_interp_num_canon(buf: &mut Vec<u8>, val: &[u8]) {
     buf.extend_from_slice(val);
 }
 
+/// Variant of [`emit_interp_field_raw`] for fields the extraction walk
+/// classified clean (`json_object_get_fields_raw_buf_classified`): the
+/// lexeme is a canonical scalar with no re-encodable escape (composites
+/// always classify dirty), so strings copy their inner content and every
+/// other value copies verbatim — zero per-field scans (#1077).
+#[inline]
+fn emit_interp_field_verbatim(buf: &mut Vec<u8>, val: &[u8]) {
+    if val.first() == Some(&b'"') && val.len() >= 2 {
+        buf.extend_from_slice(&val[1..val.len() - 1]);
+    } else {
+        buf.extend_from_slice(val);
+    }
+}
+
 /// Variant of [`emit_interp_field_raw`] for records pre-checked to contain
 /// no `\` / DEL byte anywhere (one per-record `memchr2` amortizes the
 /// per-field escape scans on the interpolation hot paths): string content
@@ -7617,11 +7631,13 @@ fn real_main() {
                     // .field | @text / @json / @base64 / @uri / @html — raw byte format
                     json_stream_raw(&input_str, |start, end| {
                         let raw = &input_bytes[start..end];
-                        let outcome = apply_field_format_raw(raw, ff_field, |val, content| {
+                        let outcome = apply_field_format_raw(raw, ff_field, |val, content, clean| {
                             match (ff_format.as_str(), content) {
                                 ("text", Some(_)) => {
-                                    // @text on string: identity — output the JSON string as-is
-                                    if raw_contains_noncanon_escape(val) { push_raw_canon_escapes(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
+                                    // @text on string: identity — output the JSON string
+                                    // as-is. A clean value can't carry a re-encodable
+                                    // escape, so the scan is skipped (#1077).
+                                    if !clean && raw_contains_noncanon_escape(val) { push_raw_canon_escapes(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
                                     compact_buf.push(b'\n');
                                     RawApplyOutcome::Emit
                                 }
@@ -7644,10 +7660,18 @@ fn real_main() {
                                 }
                                 ("json" | "text", None) => {
                                     // @json/@text on non-string scalars: wrap raw bytes in
-                                    // quotes. A composite needs its inner quotes escaped, and
-                                    // a NaN/Infinity or non-canonical number lexeme must be
-                                    // normalised, not echoed (#1021) — both defer to the
-                                    // typed path.
+                                    // quotes. A clean value is a canonical scalar lexeme
+                                    // (composites always classify dirty) — emit verbatim
+                                    // with no per-value scan (#1077). Otherwise a composite
+                                    // needs its inner quotes escaped, and a NaN/Infinity or
+                                    // non-canonical number lexeme must be normalised, not
+                                    // echoed (#1021) — both defer to the typed path.
+                                    if clean {
+                                        compact_buf.push(b'"');
+                                        compact_buf.extend_from_slice(val);
+                                        compact_buf.extend_from_slice(b"\"\n");
+                                        return RawApplyOutcome::Emit;
+                                    }
                                     if matches!(val.first(), Some(b'{') | Some(b'['))
                                         || raw_contains_non_canonical_number(val)
                                     {
@@ -7867,12 +7891,16 @@ fn real_main() {
                             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                             return Ok(());
                         }
-                        // Extract all needed fields
-                        if json_object_get_fields_raw_buf(raw, 0, &field_names, &mut ranges_buf) {
+                        // Extract all needed fields, classifying their
+                        // verbatim-safety in the same walk (#1077).
+                        if let Some(all_clean) = jq_jit::value::json_object_get_fields_raw_buf_classified(raw, 0, &field_names, &mut ranges_buf) {
                             // One scan amortizes the per-field escape checks:
                             // a record with no backslash/DEL anywhere cannot
                             // need string re-encoding (#1027 cost control).
-                            let strings_clean = memchr::memchr2(b'\\', 0x7F, raw).is_none();
+                            // Skipped when every extracted field already
+                            // classified clean — those emit verbatim.
+                            let strings_clean = !all_clean
+                                && memchr::memchr2(b'\\', 0x7F, raw).is_none();
                             compact_buf.push(b'"');
                             let mut field_idx = 0;
                             for (i, (is_lit, _)) in interp_parts.iter().enumerate() {
@@ -7887,7 +7915,9 @@ fn real_main() {
                                     // keep canonical lexemes and re-render
                                     // NaN/Infinity/non-canonical ones (#1021);
                                     // composites re-escape for embedding.
-                                    if strings_clean {
+                                    if all_clean {
+                                        emit_interp_field_verbatim(&mut compact_buf, val);
+                                    } else if strings_clean {
                                         emit_interp_field_raw_clean(&mut compact_buf, val);
                                     } else {
                                         emit_interp_field_raw(&mut compact_buf, val);
@@ -20257,10 +20287,11 @@ fn real_main() {
                 let content_bytes = content.as_bytes();
                 json_stream_raw(content, |start, end| {
                     let raw = &content_bytes[start..end];
-                    let outcome = apply_field_format_raw(raw, ff_field, |val, content_no_quotes| {
+                    let outcome = apply_field_format_raw(raw, ff_field, |val, content_no_quotes, clean| {
                         match (ff_format.as_str(), content_no_quotes) {
                             ("text", Some(_)) => {
-                                if raw_contains_noncanon_escape(val) { push_raw_canon_escapes(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
+                                // Clean values can't carry a re-encodable escape (#1077).
+                                if !clean && raw_contains_noncanon_escape(val) { push_raw_canon_escapes(&mut compact_buf, val); } else { compact_buf.extend_from_slice(val); }
                                 compact_buf.push(b'\n');
                                 RawApplyOutcome::Emit
                             }
@@ -20281,6 +20312,13 @@ fn real_main() {
                                 RawApplyOutcome::Emit
                             }
                             ("json" | "text", None) => {
+                                // Clean scalar lexeme: verbatim, no per-value scan (#1077).
+                                if clean {
+                                    compact_buf.push(b'"');
+                                    compact_buf.extend_from_slice(val);
+                                    compact_buf.extend_from_slice(b"\"\n");
+                                    return RawApplyOutcome::Emit;
+                                }
                                 // Composite / non-canonical number lexeme: defer to the
                                 // typed path (inner-quote escaping, NaN -> null; #1021).
                                 if matches!(val.first(), Some(b'{') | Some(b'['))
@@ -20502,9 +20540,11 @@ fn real_main() {
                         process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
                         return Ok(());
                     }
-                    if json_object_get_fields_raw_buf(raw, 0, &field_names, &mut ranges_buf) {
-                        // See the NDJSON twin: per-record escape gate (#1027).
-                        let strings_clean = memchr::memchr2(b'\\', 0x7F, raw).is_none();
+                    if let Some(all_clean) = jq_jit::value::json_object_get_fields_raw_buf_classified(raw, 0, &field_names, &mut ranges_buf) {
+                        // See the NDJSON twin: per-record escape gate (#1027),
+                        // skipped when every extracted field classified clean (#1077).
+                        let strings_clean = !all_clean
+                            && memchr::memchr2(b'\\', 0x7F, raw).is_none();
                         compact_buf.push(b'"');
                         let mut field_idx = 0;
                         for (i, (is_lit, _)) in interp_parts.iter().enumerate() {
@@ -20516,7 +20556,9 @@ fn real_main() {
                                 let val = &raw[vs..ve];
                                 // Shared emitter (see the NDJSON twin): #1027 /
                                 // #1021 canonicalisation in one place.
-                                if strings_clean {
+                                if all_clean {
+                                    emit_interp_field_verbatim(&mut compact_buf, val);
+                                } else if strings_clean {
                                     emit_interp_field_raw_clean(&mut compact_buf, val);
                                 } else {
                                     emit_interp_field_raw(&mut compact_buf, val);
