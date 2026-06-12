@@ -300,6 +300,335 @@ fn print_jq_error_typed(e: &anyhow::Error) {
     }
 }
 
+/// Format a per-record runtime error into the line jq writes to stderr,
+/// mirroring [`print_jq_error_typed`] but returning a `String` so a worker
+/// thread can hand it back to the writer (an `anyhow::Error` may carry a
+/// `Value`/`Rc` payload and is not `Send`). The `<stdin>:N` line number
+/// reflects the worker's thread-local counter, which `--parallel` never
+/// advances (it rejects `input_line_number`), so it reads `:0` — a cosmetic
+/// divergence on stderr only; stdout stays byte-identical to sequential.
+fn format_record_error(e: &anyhow::Error) -> String {
+    let line = jq_jit::eval::get_input_line_number();
+    if let Some(ev) = e.downcast_ref::<jq_jit::signal::ErrorValue>() {
+        match jq_jit::signal::take_error_payload(ev) {
+            Value::Str(s) => format!("jq: error (at <stdin>:{}): {}", line, s.as_str()),
+            other => format!(
+                "jq: error (at <stdin>:{}) (not a string): {}",
+                line,
+                value_to_json_precise(&other),
+            ),
+        }
+    } else {
+        format!("jq: error (at <stdin>:{}): {}", line, e)
+    }
+}
+
+/// Per-record output-formatting knobs for the `--parallel` worker pool
+/// (#1054). Covers exactly the subset of `process_input`'s buffered branches
+/// that `parallel_active` permits: compact or pretty, no color / seq / raw /
+/// sort-keys / join. Copied into each worker so threads share no state.
+#[derive(Clone, Copy)]
+struct ParFmt {
+    /// `use_pretty_buf` (true) vs `use_compact_buf` (false).
+    pretty: bool,
+    indent_n: usize,
+    tab: bool,
+    exit_status: bool,
+    /// Engage output fusion (#1058) for compact, non-`-e` output.
+    output_fusion: bool,
+}
+
+/// One batch's serialized output, moved from a worker thread back to the
+/// single writer. Holds only `Send` data (no `Rc`/`Value`).
+#[derive(Default)]
+struct BatchOut {
+    bytes: Vec<u8>,
+    errors: Vec<String>,
+    had_error: bool,
+    /// Whether any output value was emitted (for the `-e` running state).
+    emitted_any: bool,
+    /// Last output's `-e` verdict: 1 = truthy, 2 = falsy.
+    last_state: u8,
+}
+
+/// A per-thread compiled filter plus the formatting knobs. Each worker owns
+/// its own `Filter` (compiled inside the worker thread, never moved across
+/// threads — `Filter` holds `Rc` and is not `Send`).
+struct Worker {
+    filter: Filter,
+    fmt: ParFmt,
+    fusion_active: bool,
+}
+
+impl Worker {
+    fn compile(
+        filter_str: &str,
+        lib_dirs: &[String],
+        memo_max_entries: Option<usize>,
+        fmt: ParFmt,
+    ) -> anyhow::Result<Worker> {
+        if fmt.output_fusion {
+            jq_jit::jit::set_output_fusion(true);
+        }
+        let mut filter = Filter::with_options(filter_str, lib_dirs, false)?;
+        if let Some(m) = memo_max_entries {
+            filter.set_memo_max_entries(m);
+        }
+        // Parallel only engages on large inputs, so arm like the binary's
+        // large-stdin path: Cranelift, then the JitOp routing fallback for
+        // whatever Cranelift declined. Output is backend-independent (the
+        // selfdiff invariant), so this only affects throughput.
+        filter.compile_jit();
+        if !filter.has_jit() {
+            filter.compile_jitop_program_for_routing();
+        }
+        let fusion_active = jq_jit::jit::output_fusion_active();
+        Ok(Worker { filter, fmt, fusion_active })
+    }
+
+    /// Execute the filter on one record's raw bytes, appending formatted
+    /// output to `out.bytes` exactly as `process_input`'s compact / pretty
+    /// buffered branches would, so the result is byte-identical to
+    /// sequential mode.
+    fn run_record(&self, raw: &[u8], out: &mut BatchOut) {
+        let input = match json_to_value(unsafe { std::str::from_utf8_unchecked(raw) }) {
+            Ok(v) => v,
+            Err(e) => {
+                // json_stream_raw already validated each record boundary, so a
+                // full parse should not fail here; record defensively.
+                out.had_error = true;
+                out.errors.push(format!("jq: error (at <stdin>:0): {}", e));
+                return;
+            }
+        };
+        let fmt = self.fmt;
+        let res = self.filter.execute_cb(&input, &mut |result| {
+            if fmt.exit_status {
+                out.emitted_any = true;
+                out.last_state = if result.is_true() { 1 } else { 2 };
+            }
+            if fmt.pretty {
+                push_pretty_line(&mut out.bytes, result, fmt.indent_n, fmt.tab);
+            } else if std::ptr::eq(result, &input)
+                && is_json_compact(raw)
+                && !raw_contains_non_canonical_number(raw)
+                && !json_value_has_duplicate_keys(raw)
+            {
+                // Compact raw passthrough — same decision as process_input's
+                // `use_compact_buf && !color_output` branch (#780/#1090).
+                if raw_contains_noncanon_escape(raw) {
+                    push_raw_canon_escapes(&mut out.bytes, raw);
+                } else {
+                    out.bytes.extend_from_slice(raw);
+                }
+                out.bytes.push(b'\n');
+            } else {
+                push_compact_line(&mut out.bytes, result);
+            }
+            Ok(true)
+        });
+        // Output fusion (#1058): fused programs stage whole records in the
+        // JIT env's (thread-local) emit buffer instead of streaming through
+        // the callback; drain into this batch's buffer.
+        if self.fusion_active {
+            jq_jit::jit::drain_emit_buf(&mut out.bytes);
+        }
+        if let Err(e) = res {
+            // `halt`/`halt_error` are rejected by is_parallel_safe, so a
+            // terminal HaltSignal cannot reach here — every error is a normal
+            // per-record error that jq prints and steps past.
+            out.had_error = true;
+            out.errors.push(format_record_error(&e));
+        }
+    }
+}
+
+/// Commit one batch's output in stream order: errors to stderr, bytes to
+/// stdout, folding the running `-e` state and the error flag.
+fn commit_batch(
+    b: &BatchOut,
+    out: &mut io::BufWriter<io::StdoutLock>,
+    running: &mut u8,
+    had_error: &mut bool,
+) {
+    for msg in &b.errors {
+        eprintln!("{}", msg);
+    }
+    let _ = out.write_all(&b.bytes);
+    if b.had_error {
+        *had_error = true;
+    }
+    if b.emitted_any {
+        *running = b.last_state;
+    }
+}
+
+/// Run a stateless filter over an NDJSON document stream across a worker
+/// pool, writing output in record order byte-identically to sequential mode
+/// (#1054). The caller guarantees `is_parallel_safe()` and a buffered
+/// compact/pretty mode (see `parallel_active`). On a malformed document the
+/// leading valid records are flushed and the parse error returned (jq's
+/// lazy-stream exit-5 behavior, #856).
+fn run_parallel_json_stream(
+    content: &str,
+    jobs: usize,
+    filter_str: &str,
+    lib_dirs: &[String],
+    memo_max_entries: Option<usize>,
+    fmt: ParFmt,
+    out: &mut io::BufWriter<io::StdoutLock>,
+    exit_state: &std::cell::Cell<u8>,
+    had_error: &mut bool,
+) -> anyhow::Result<()> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc;
+    use std::sync::Mutex;
+
+    // Record byte ranges in stream order. A malformed document stops the scan
+    // with the leading valid ranges retained.
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    let parse_err = match json_stream_raw(content, |s, e| {
+        ranges.push((s, e));
+        Ok(())
+    }) {
+        Ok(()) => None,
+        Err(e) => Some(e),
+    };
+
+    let content_bytes = content.as_bytes();
+    // Seed the running `-e` state from any prior input source (the file loop
+    // calls this once per file) so a later empty file does not clobber an
+    // earlier verdict.
+    let mut running_state: u8 = exit_state.get();
+
+    // Below the spawn threshold (tiny inputs), run inline on this thread —
+    // worker creation would dominate.
+    const PAR_MIN_RECORDS: usize = 256;
+    let workers = if ranges.len() < PAR_MIN_RECORDS { 1 } else { jobs.max(1) };
+
+    if workers <= 1 {
+        let worker = Worker::compile(filter_str, lib_dirs, memo_max_entries, fmt)?;
+        let mut b = BatchOut::default();
+        for &(s, e) in &ranges {
+            worker.run_record(&content_bytes[s..e], &mut b);
+        }
+        commit_batch(&b, out, &mut running_state, had_error);
+        exit_state.set(running_state);
+        return match parse_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        };
+    }
+
+    // Split into contiguous batches — more than workers so a slow batch can't
+    // strand idle threads. Workers claim batch indices off a shared counter,
+    // run them, and ship each finished batch to a dedicated writer thread that
+    // drains a reorder buffer in stream order. The writer runs *concurrently*
+    // with the workers, so output is flushed as the in-order prefix becomes
+    // available rather than buffering the whole stream in memory.
+    let nbatch = (workers * 8).min(ranges.len()).max(1);
+    let per = ranges.len().div_ceil(nbatch);
+    let batches: Vec<&[(usize, usize)]> = ranges.chunks(per).collect();
+    let nbatch = batches.len();
+    let next = AtomicUsize::new(0);
+    let compile_err: Mutex<Option<String>> = Mutex::new(None);
+
+    // Match the main thread's 2 GiB stack (real_main itself runs on one) so
+    // deeply nested documents recurse identically to sequential mode.
+    const WORKER_STACK: usize = 2048 * 1024 * 1024;
+
+    let (tx, rx) = mpsc::channel::<(usize, BatchOut)>();
+
+    // The main thread is the writer: it drains finished batches off the
+    // channel and reassembles them in index (stream) order, holding only the
+    // out-of-order tail in memory. `out`/`StdoutLock` are `!Send`, so keeping
+    // the writes here (rather than on a spawned thread) is also what lets the
+    // workers ship only the `Send` `BatchOut` across the boundary.
+    std::thread::scope(|scope| {
+        // Shared, read-only views the `move` worker closures capture by
+        // reference (so each spawn does not try to own them).
+        let batches = &batches;
+        let next = &next;
+        let compile_err = &compile_err;
+        for _ in 0..workers {
+            let builder = std::thread::Builder::new().stack_size(WORKER_STACK);
+            let tx = tx.clone();
+            let spawn = builder.spawn_scoped(scope, move || {
+                let worker = match Worker::compile(filter_str, lib_dirs, memo_max_entries, fmt) {
+                    Ok(w) => w,
+                    Err(e) => {
+                        let mut ce = compile_err.lock().unwrap();
+                        if ce.is_none() {
+                            *ce = Some(format!("{}", e));
+                        }
+                        return;
+                    }
+                };
+                // Workers claim batch indices dynamically, so a single
+                // surviving worker still covers every batch if others fail to
+                // compile.
+                loop {
+                    let bi = next.fetch_add(1, Ordering::Relaxed);
+                    if bi >= nbatch {
+                        break;
+                    }
+                    let mut b = BatchOut::default();
+                    for &(s, e) in batches[bi] {
+                        worker.run_record(&content_bytes[s..e], &mut b);
+                    }
+                    // Fails only if the receiver (main thread) is gone, which
+                    // does not happen before the drain below completes.
+                    let _ = tx.send((bi, b));
+                }
+            });
+            if let Err(e) = spawn {
+                let mut ce = compile_err.lock().unwrap();
+                if ce.is_none() {
+                    *ce = Some(format!("failed to spawn parallel worker: {}", e));
+                }
+            }
+        }
+        // Drop the original sender so `rx.recv()` ends once all worker clones
+        // are gone (every batch sent, or a worker died).
+        drop(tx);
+
+        // Drain in stream order, flushing the in-order prefix as it arrives.
+        let mut pending: Vec<Option<BatchOut>> = (0..nbatch).map(|_| None).collect();
+        let mut next_write = 0usize;
+        while let Ok((bi, b)) = rx.recv() {
+            pending[bi] = Some(b);
+            while next_write < nbatch {
+                match pending[next_write].take() {
+                    Some(b) => {
+                        commit_batch(&b, out, &mut running_state, had_error);
+                        next_write += 1;
+                    }
+                    None => break,
+                }
+            }
+        }
+    });
+
+    // A worker compile/spawn failure is fatal — surface it like the sequential
+    // compile-time error (exit 3). With an already-parsed, parallel-safe
+    // filter this realistically only fires on resource limits. (A compile
+    // failure stops a worker before it sends, so the writer simply stops at
+    // the gap; any prefix already written is harmless since we exit non-zero.)
+    if let Some(msg) = compile_err.into_inner().unwrap() {
+        // `out` was moved into the writer thread; its buffer is flushed by
+        // real_main's owned BufWriter on the normal path, but here we exit
+        // immediately on an unreachable-in-practice resource failure.
+        eprintln!("jq: error: {}", msg);
+        std::process::exit(3);
+    }
+
+    exit_state.set(running_state);
+    match parse_err {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
 use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json_stream_raw, json_stream_project, json_value_has_duplicate_keys, json_stream_has_duplicate_keys, json_object_get_num, json_object_get_two_nums, json_object_get_field_raw, json_object_get_fields_raw_buf, parse_json_num, json_value_length, json_object_keys_unsorted_to_buf,json_object_keys_join_to_buf, json_object_has_key, json_object_has_all_keys, json_object_has_any_key, json_object_del_field, json_object_del_fields, json_object_merge_literal, json_object_sort_keys, json_each_value_raw, json_each_value_cb, json_to_entries_raw, json_object_set_field_raw, json_object_update_field_num, json_object_update_field_num_chain,json_object_select_then_update_num, json_object_select_then_update_str_concat, json_object_select_compound_then_update_num, json_object_select_str_then_update_num, is_json_compact, push_json_compact_raw, push_tojson_raw, push_json_pretty_raw, push_json_pretty_raw_at, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, push_compact_line_color, push_pretty_line, push_pretty_line_color, push_jq_number_bytes, write_value_compact_ext, write_value_compact_line, write_value_pretty_line_color, value_to_json_pretty_color, walk_json_transform_nums, pool_value, skip_json_value, raw_contains_non_canonical_number, append_canonical_value, raw_contains_noncanon_escape, push_raw_canon_escapes};
 use jq_jit::interpreter::Filter;
 use jq_jit::fast_path::{
@@ -2499,6 +2828,10 @@ fn real_main() {
     let mut color_output = false;
     let mut unbuffered = false;
     let mut seq = false;
+    // 0 = parallel disabled. `--parallel` sets it to the detected core count,
+    // `--parallel=N` to N. Per-record worker-pool execution for stateless
+    // filters on NDJSON streams (#1054); gated further by `parallel_active`.
+    let mut parallel_jobs: usize = 0;
     let mut arg_vars: Vec<(String, Value)> = Vec::new();
     let mut argjson_vars: Vec<(String, Value)> = Vec::new();
     let mut lib_dirs: Vec<String> = Vec::new();
@@ -2574,6 +2907,20 @@ fn real_main() {
             "-M" | "--monochrome-output" => color_output = false,
             "--unbuffered" => unbuffered = true,
             "--seq" => seq = true,
+            "--parallel" => {
+                parallel_jobs = std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(1);
+            }
+            s if s.starts_with("--parallel=") => {
+                match s["--parallel=".len()..].parse::<usize>() {
+                    Ok(n) => parallel_jobs = n,
+                    Err(_) => {
+                        eprintln!("jq: --parallel expects a non-negative integer");
+                        process::exit(2);
+                    }
+                }
+            }
             "--force-jit" => { force_jit = true; force_interp = false; }
             "--force-interp" | "--force-interpreter" => { force_interp = true; force_jit = false; }
             "--memo-max-entries" => {
@@ -3029,6 +3376,33 @@ fn real_main() {
     // Use Vec-based buffering for compact output to avoid per-value write_all overhead
     let use_compact_buf = compact && !raw_output && !sort_keys && !join_output;
     let use_pretty_buf = !compact && !raw_output && !sort_keys && !join_output && !tab;
+
+    // --parallel (#1054): shard the per-record NDJSON stream across a worker
+    // pool when the filter is stateless and the output mode is a plain
+    // buffered compact/pretty stream. The buffered modes already exclude
+    // -r/-S/-j/--tab(pretty); we additionally require no color/seq/unbuffered
+    // (those alter or interleave per-record output) and not null-input (a
+    // different, single-document code path). Output stays byte-identical to
+    // sequential because each worker reuses the same serializer and the
+    // writer reassembles batches in record order.
+    let parallel_active = parallel_jobs >= 2
+        && (use_compact_buf || use_pretty_buf)
+        && !color_output
+        && !seq
+        && !unbuffered
+        && !null_input
+        && filter.is_parallel_safe();
+    let par_fmt = ParFmt {
+        pretty: use_pretty_buf,
+        indent_n,
+        tab,
+        exit_status,
+        // Fusion (#1058) only applies to compact output and needs the
+        // yield callback unused; -e must observe each value, so disable it
+        // there (matching the binary's own fusion gate).
+        output_fusion: use_compact_buf && !exit_status,
+    };
+
     // Helper macro: emit raw JSON bytes to buffer with trailing newline,
     // handling compact vs pretty output.
     //
@@ -4044,7 +4418,12 @@ fn real_main() {
                 // value was terminated).
                 let total_nl: u64 = input_bytes.iter().filter(|&&b| b == b'\n').count() as u64;
                 let line_state = std::cell::Cell::new((0u64, 0usize));
-                let parse_result = if filter.is_empty() {
+                let parse_result = if parallel_active {
+                    run_parallel_json_stream(
+                        &input_str, parallel_jobs, &filter_str, &lib_dirs,
+                        memo_max_entries, par_fmt, &mut out, &exit_state, &mut had_error,
+                    )
+                } else if filter.is_empty() {
                     json_stream_raw(&input_str, |_, _| Ok(()))
                 } else if let Some(ref lit) = literal_output {
                     json_stream_raw(&input_str, |_, _| {
@@ -13191,7 +13570,12 @@ fn real_main() {
                 content = "";
             }
             let _ = &mmap; // keep mmap alive
-            let parse_result = if slurp {
+            let parse_result = if parallel_active && !slurp && !raw_input {
+                run_parallel_json_stream(
+                    content, parallel_jobs, &filter_str, &lib_dirs,
+                    memo_max_entries, par_fmt, &mut out, &exit_state, &mut had_error,
+                )
+            } else if slurp {
                 // Slurp: collect all JSON values into an array, process once
                 let mut values = Vec::new();
                 let r = if raw_input {
@@ -22115,6 +22499,7 @@ fn print_usage() {
     eprintln!("  -M, --monochrome-output  Disable color output (default)");
     eprintln!("  --args                   Remaining args are string $ARGS.positional");
     eprintln!("  --jsonargs               Remaining args are JSON $ARGS.positional");
+    eprintln!("  --parallel[=N]           Run stateless filters per-record across N workers (jqx; default: cores)");
     eprintln!("  --memo-max-entries N     Per-slot cap for memoize/1 cache (jqx; default 1000000)");
     eprintln!("  --debug-memo             Print per-slot memoize cache stats to stderr on exit (jqx)");
     eprintln!("  --trace-mutate           Print one line per mutate(...) invocation to stderr (jqx)");

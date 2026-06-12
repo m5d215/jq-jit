@@ -525,6 +525,138 @@ fn push_const_comma_list(expr: &crate::ir::Expr, buf: &mut Vec<u8>, first: bool)
 }
 
 impl Filter {
+    /// Returns true if this filter can be applied to each top-level input
+    /// document independently, with no observation of cross-record state,
+    /// stream position, shared mutable cache, side effects, or
+    /// non-determinism. This is the gate for `--parallel` per-record
+    /// execution (#1054): when true, the binary may shard the NDJSON input
+    /// across a worker pool and reassemble the output in record order,
+    /// byte-identically to sequential mode.
+    ///
+    /// The walk follows `FuncCall` into the callee body (a `def f: input; f`
+    /// hides the stream read behind the call, like [`Filter::uses_inputs`]),
+    /// guarding recursion via `visited`. The per-variant match is
+    /// deliberately exhaustive — no `_` wildcard — so a future `Expr`
+    /// variant fails to compile here until its parallel-safety is decided
+    /// explicitly rather than silently inheriting "safe".
+    pub fn is_parallel_safe(&self) -> bool {
+        let (ref expr, ref funcs) = self.parsed;
+        Self::expr_is_parallel_safe(expr, funcs, &mut Vec::new())
+    }
+
+    fn expr_is_parallel_safe(
+        e: &crate::ir::Expr,
+        funcs: &[crate::ir::CompiledFunc],
+        visited: &mut Vec<crate::ir::FuncId>,
+    ) -> bool {
+        use crate::ir::{Expr, StringPart, UnaryOp};
+        macro_rules! safe { ($x:expr) => { Self::expr_is_parallel_safe($x, funcs, visited) }; }
+        macro_rules! opt { ($x:expr) => { $x.as_ref().map_or(true, |e| safe!(e)) }; }
+        match e {
+            // --- Non-parallel-safe: reject (the only `false`-returning arms) ---
+
+            // Consume the shared input stream — each record is no longer
+            // independent.
+            Expr::ReadInput | Expr::ReadInputs => false,
+            // Observe the program/stream position; `$__loc__` is constant but
+            // rejected to mirror the issue's conservative spec.
+            Expr::Loc { .. } => false,
+            // Shared cache across records (the slot map is per-Env, but a
+            // worker pool would split it and reorder lookups).
+            Expr::Memoize { .. } => false,
+            // jqx in-place mutation: aliasing-sensitive, treated as a side
+            // effect (see issue #666 semantics).
+            Expr::Mutate { .. } => false,
+            // Side effects whose ordering relative to other records matters.
+            Expr::Debug { .. } | Expr::Stderr { .. } => false,
+            // Clock read — non-deterministic, would break byte-identity
+            // between sequential and parallel runs.
+            Expr::UnaryOp { op: UnaryOp::Now, .. } => false,
+
+            // --- Structural: safe iff every sub-expression is safe ---
+
+            Expr::Input | Expr::Literal(_) | Expr::LoadVar { .. } | Expr::Empty
+            | Expr::Not | Expr::Env | Expr::Builtins | Expr::ModuleMeta
+            | Expr::GenLabel => true,
+
+            Expr::UnaryOp { operand, .. } | Expr::Negate { operand } => safe!(operand),
+            Expr::BinOp { lhs, rhs, .. } => safe!(lhs) && safe!(rhs),
+            Expr::Index { expr, key } | Expr::IndexOpt { expr, key } => safe!(expr) && safe!(key),
+            Expr::Pipe { left, right } | Expr::Comma { left, right } => safe!(left) && safe!(right),
+            Expr::Alternative { primary, fallback } => safe!(primary) && safe!(fallback),
+            Expr::IfThenElse { cond, then_branch, else_branch } =>
+                safe!(cond) && safe!(then_branch) && safe!(else_branch),
+            Expr::TryCatch { try_expr, catch_expr, .. } => safe!(try_expr) && safe!(catch_expr),
+            Expr::Each { input_expr } | Expr::EachOpt { input_expr }
+            | Expr::Recurse { input_expr } => safe!(input_expr),
+            Expr::LetBinding { value, body, .. } => safe!(value) && safe!(body),
+            Expr::Reduce { source, init, update, .. } => safe!(source) && safe!(init) && safe!(update),
+            Expr::Foreach { source, init, update, extract, .. } =>
+                safe!(source) && safe!(init) && safe!(update) && opt!(extract),
+            Expr::Collect { generator } => safe!(generator),
+            Expr::ObjectConstruct { pairs } => pairs.iter().all(|(k, v)| safe!(k) && safe!(v)),
+            Expr::Range { from, to, step } => safe!(from) && safe!(to) && opt!(step),
+            Expr::Label { body, .. } => safe!(body),
+            Expr::Break { value, .. } => safe!(value),
+            Expr::Update { path_expr, update_expr } => safe!(path_expr) && safe!(update_expr),
+            Expr::Assign { path_expr, value_expr } => safe!(path_expr) && safe!(value_expr),
+            Expr::PathExpr { expr } => safe!(expr),
+            Expr::SetPath { path, value } => safe!(path) && safe!(value),
+            Expr::GetPath { path } => safe!(path),
+            Expr::DelPaths { paths } => safe!(paths),
+            Expr::StringInterpolation { parts } => parts.iter().all(|p| match p {
+                StringPart::Expr(e) => safe!(e),
+                StringPart::Literal(_) => true,
+            }),
+            Expr::Limit { count, generator } => safe!(count) && safe!(generator),
+            Expr::While { cond, update } | Expr::Until { cond, update } => safe!(cond) && safe!(update),
+            Expr::Repeat { update } => safe!(update),
+            Expr::AllShort { generator, predicate }
+            | Expr::AnyShort { generator, predicate } => safe!(generator) && safe!(predicate),
+            Expr::Error { msg } => opt!(msg),
+            Expr::Format { expr, .. } => safe!(expr),
+            Expr::ClosureOp { input_expr, key_expr, .. } => safe!(input_expr) && safe!(key_expr),
+            Expr::RegexTest { input_expr, re, flags }
+            | Expr::RegexMatch { input_expr, re, flags }
+            | Expr::RegexCapture { input_expr, re, flags }
+            | Expr::RegexScan { input_expr, re, flags } => safe!(input_expr) && safe!(re) && safe!(flags),
+            Expr::RegexSub { input_expr, re, tostr, flags }
+            | Expr::RegexGsub { input_expr, re, tostr, flags } =>
+                safe!(input_expr) && safe!(re) && safe!(tostr) && safe!(flags),
+            Expr::AlternativeDestructure { alternatives } => alternatives.iter().all(|a| safe!(a)),
+            Expr::Slice { expr, from, to } => safe!(expr) && opt!(from) && opt!(to),
+
+            // Runtime-dispatched builtins: reject the stateful / side-effecting
+            // / position-observing set, otherwise safe iff the args are safe.
+            Expr::CallBuiltin { op, args } => {
+                !matches!(
+                    op,
+                    BuiltinOp::Halt
+                        | BuiltinOp::HaltError
+                        | BuiltinOp::InputFilename
+                        | BuiltinOp::InputLineNumber
+                        | BuiltinOp::Exec
+                        | BuiltinOp::Execv
+                ) && args.iter().all(|a| safe!(a))
+            }
+
+            // A user-defined call hides its work in the callee body; descend
+            // into it (guarding recursion) plus its argument expressions.
+            Expr::FuncCall { func_id, args } => {
+                if !args.iter().all(|a| safe!(a)) {
+                    return false;
+                }
+                if visited.contains(func_id) {
+                    return true;
+                }
+                visited.push(*func_id);
+                funcs
+                    .get(func_id.idx())
+                    .map_or(false, |f| Self::expr_is_parallel_safe(&f.body, funcs, visited))
+            }
+        }
+    }
+
     /// Returns true if this filter is a simple identity (`.`) that passes through input unchanged.
     /// Also recognizes semantic equivalences like `to_entries | from_entries`.
     pub fn is_identity(&self) -> bool {
