@@ -6,6 +6,15 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
+/// JSON-escape a filesystem path for embedding in an expected output
+/// string. Windows canonical paths (`\\?\C:\...`) contain backslashes,
+/// which the `$__loc__` output renders as `\\` — embedding the raw path
+/// made these assertions Windows-only failures (caught by release.yml,
+/// the only workflow that tests on Windows).
+fn json_escaped(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 fn run(args: &[&str]) -> (String, bool) {
     let jq_jit = env!("CARGO_BIN_EXE_jq-jit");
     let mut child = Command::new(jq_jit)
@@ -30,7 +39,7 @@ fn loc_file_attributes_to_module() {
     std::fs::write(dir.join("w.jq"), "def w: $__loc__;").unwrap();
     let dir_s = dir.to_str().unwrap();
     let canon = std::fs::canonicalize(dir.join("w.jq")).unwrap();
-    let canon_s = canon.to_str().unwrap();
+    let canon_s = json_escaped(canon.to_str().unwrap());
     let expected = format!(r#"{{"file":"{canon_s}","line":1}}"#);
 
     // import
@@ -66,7 +75,7 @@ fn loc_line_correct_for_later_module_def() {
     std::fs::write(dir.join("m2.jq"), "def f: 1;\ndef g: $__loc__;").unwrap();
     let dir_s = dir.to_str().unwrap();
     let canon = std::fs::canonicalize(dir.join("m2.jq")).unwrap();
-    let canon_s = canon.to_str().unwrap();
+    let canon_s = json_escaped(canon.to_str().unwrap());
 
     let (out, ok) = run(&["-L", dir_s, "-c", "import \"m2\" as m; m::g"]);
     assert!(ok, "import failed: {out:?}");
