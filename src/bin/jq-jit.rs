@@ -3296,9 +3296,24 @@ fn real_main() {
         jq_jit::jit::set_output_fusion(true);
     }
 
-    // Lazy JIT: compile only when input is large enough to amortize compilation cost.
-    // Exception: always JIT for loop constructs (reduce/foreach/while/until/recurse)
-    // since their runtime dominates regardless of input size.
+    // Lazy JIT: Cranelift-compile only when the input is large enough to
+    // amortize codegen cost. Exception: always compile for loop constructs
+    // (reduce/foreach/while/until/recurse) since their runtime dominates
+    // regardless of input size.
+    //
+    // Rationale (#1030). The crossover this threshold guards moved with
+    // #1059: a sub-threshold *flattenable* filter no longer falls back to the
+    // tree-walking evaluator but to the JitOp interpreter (shared lowering, no
+    // codegen — see the `compile_jitop_program_for_routing` catch-all below).
+    // So 4096 now marks where one-shot Cranelift codegen begins to pay for
+    // itself against the JitOp interpreter's per-byte execution cost, not
+    // against eval. It is a conservative amortization point, not a sharp
+    // cliff: in the sub-100KB regime the codegen/exec gap for typical filters
+    // is small next to fixed per-process startup, so a CLI timing sweep is
+    // startup-dominated and cannot resolve the byte-level crossover. Deriving
+    // it precisely would need an in-process (criterion-style) harness that
+    // compiles+runs each backend without a process restart; left at 4096
+    // pending such a harness.
     // Must be done before process_input closure captures &filter.
     const JIT_THRESHOLD: usize = 4096;
     // For null_input, there is no input to amortize JIT compile cost against.

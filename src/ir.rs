@@ -813,11 +813,17 @@ pub enum ClosureOpKind {
 }
 
 /// A compiled function (subfunction from jq bytecode).
+///
+/// `body` is wrapped in `Rc` so that cloning a `CompiledFunc` — and, in the
+/// hot path, the per-call-site inlining in `jit.rs` — only bumps a refcount
+/// instead of deep-copying the whole `Expr` tree. Inlining never mutates the
+/// stored body (it reads it and produces a fresh inlined/substituted tree), so
+/// sharing is sound (#1030).
 #[derive(Debug, Clone)]
 pub struct CompiledFunc {
     pub name: Option<String>,
     pub nargs: usize,
-    pub body: Expr,
+    pub body: std::rc::Rc<Expr>,
     pub param_vars: Vec<VarIdx>,
 }
 
