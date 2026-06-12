@@ -10,6 +10,7 @@ A JIT-compiling [jq](https://jqlang.github.io/jq/) in Rust using [Cranelift](htt
 - **JIT compilation** via Cranelift for hot execution paths
 - **Raw byte fast paths** — 70+ filter shapes operate directly on raw bytes, skipping JSON parsing entirely; 180+ shapes in total route to specialized fast paths
 - **Streaming JSON parser** for memory-efficient NDJSON processing
+- **Parallel per-record execution** — `--parallel` shards a stateless filter over an NDJSON stream across a worker pool, byte-identically to sequential mode (see [Parallel execution](#parallel-execution))
 - **Memory-mapped file I/O** — mmap-based file reading with no upfront allocation
 - **Optimized value representation** with compact strings, mimalloc, and inline Cranelift codegen
 - **jqx extensions** — shell command execution (`exec`/`execv`), CSV/TSV parsing (`fromcsv`/`fromcsvh`/`fromtsv`/`fromtsvh`), function-result memoization (`memoize`), and the in-place path-update contract (`mutate`)
@@ -110,6 +111,7 @@ jq-jit [OPTIONS] <FILTER> [FILE...]
 | `--indent N` | Use N spaces for indentation (range -1..=7; -1 means tab; default: 2) |
 | `--unbuffered` | Flush output after each value |
 | `--seq` | Frame each output with `RS` (0x1E) per RFC 7464 |
+| `--parallel[=N]` | _(jqx)_ Run a stateless filter per-record across N worker threads (default: core count); see [Parallel execution](#parallel-execution) |
 | `-f`, `--from-file FILE` | Read filter from file |
 | `-L`, `--library-path DIR` | Add DIR to the module search path (repeatable) |
 | `--arg NAME VALUE` | Set `$NAME` to string VALUE |
@@ -298,6 +300,42 @@ jq-jit --debug-memo -n 'def fib: memoize(if . < 2 then . else ((. - 1) | fib) + 
 The 1-arg form keys only by the current input. If your body closes over a
 `$var` that varies between calls, results will be stale — pull the var into
 the key explicitly with the 2-arg form: `memoize(. + $x; [., $x])`.
+
+### Parallel execution
+
+For a **stateless** filter over an NDJSON document stream, every input record
+is independent: there is nothing to share between records, so they can run on
+a worker pool with the output reassembled in record order. `--parallel[=N]`
+does exactly that — something single-threaded jq structurally cannot.
+
+```bash
+# Spread the filter across all cores
+jq-jit -c --parallel 'select(.level == "error") | {ts, msg}' < events.ndjson
+
+# Pin the worker count
+jq-jit -c --parallel=4 '{id, total: (.items | map(.qty * .price) | add)}' < orders.ndjson
+```
+
+Output is **byte-identical** to sequential mode: each worker runs the same
+compiled filter and serializer, and a single writer drains a reorder buffer in
+stream order. Per-record errors still surface in record order, and `-e` still
+reflects the last output value across the whole stream.
+
+`--parallel` only engages when the filter is provably independent per record.
+Anything that observes cross-record state, stream position, shared mutable
+state, side effects, or non-determinism transparently falls back to sequential
+execution — including `input`/`inputs`, `limit`/`first` over the input stream,
+`input_line_number`, `$__loc__`, `memoize`, `mutate`, `exec`/`execv`,
+`debug`/`stderr`, `halt`/`halt_error`, and `now`. The check follows
+user-defined function calls, so a stream read hidden behind a `def` is still
+detected. It also only applies to plain buffered compact/pretty output (not
+`-r`/`-S`/`-j`/`-C`/`--seq`/`--unbuffered` or `-n` null-input); other modes run
+sequentially. Tiny inputs run inline regardless, since thread setup would
+dominate.
+
+The speedup tracks the per-record work: light projections are bounded by the
+serial input scan and output write (Amdahl), while heavier per-record filters
+scale close to the worker count.
 
 ## Testing
 
