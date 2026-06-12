@@ -610,6 +610,13 @@ enum JitOp {
     /// In-place setpath: container[path...] = val. Container must have refcount == 1.
     /// Both path and val slots become Null after the call.
     SetPathMut { container: SlotId, path: SlotId, val: SlotId },
+    /// Validate that `path` (an array slot) navigates `input` without a
+    /// type error, for effect only — neither slot is consumed and no value
+    /// is produced. Backs the `path(<simple path>)` lowering (#1085): eval
+    /// validates the walk while building the path, and a dedicated by-ref
+    /// probe keeps that check off the allocation/clone path that a generic
+    /// getpath CallBuiltin would pay per input.
+    PathProbe { input: SlotId, path: SlotId },
 
     // Collect (array construction)
     CollectBegin,
@@ -1234,6 +1241,9 @@ impl Flattener {
             // (setpath on a scalar acc) sets the error flag instead of
             // silently no-opping (#1085).
             JitOp::SetPathMut { .. } |
+            // The path() navigation probe raises eval's "Cannot index ..."
+            // for a type-mismatched walk (#1085).
+            JitOp::PathProbe { .. } |
             // The reduce in-place update/assign navigation: a type-mismatched
             // index (string key on array, number key on object, any key on a
             // scalar) sets the error flag instead of silently navigating to
@@ -4141,16 +4151,12 @@ impl Flattener {
                         // #1085: eval validates the navigation while
                         // building the path (`5 | path(.[0])` raises
                         // "Cannot index number with number"); the static
-                        // array alone skips that. getpath performs the
-                        // identical walk with identical errors, so run it
-                        // for effect and discard the value.
-                        let probe = self.alloc_slot();
-                        self.emit(JitOp::CallBuiltin {
-                            dst: probe,
-                            builtin: JitBuiltin::Rt(crate::runtime::RtBuiltin::Getpath),
-                            args: vec![input_slot, path_arr],
-                        });
-                        self.emit(JitOp::Drop { slot: probe });
+                        // array alone skips that. The probe performs the
+                        // identical walk by reference — a getpath
+                        // CallBuiltin here cost ~25ns/input in arg
+                        // clones/dispatch and regressed path(.name,.x)
+                        // 1.2x at the v1.9.0 gate.
+                        self.emit(JitOp::PathProbe { input: input_slot, path: path_arr });
                         self.emit_yield(path_arr);
                         self.emit(JitOp::Drop { slot: path_arr });
                         return true;
@@ -8640,6 +8646,16 @@ extern "C" fn jit_rt_setpath_mut(container: *mut Value, path: *const Value, val:
     }
 }
 
+extern "C" fn jit_rt_path_probe(input: *const Value, path: *const Value) {
+    unsafe {
+        // Errors surface via the pending-error flag; the op is marked
+        // fallible so a CheckError/JumpIfError follows every emission.
+        if let Err(e) = crate::runtime::rt_path_probe(&*input, &*path) {
+            set_jit_error_from(&e);
+        }
+    }
+}
+
 extern "C" fn jit_rt_put_by_idx(container: *mut Value, idx: i64, val: *mut Value) {
     unsafe {
         let new_val = std::ptr::read(val);
@@ -10038,6 +10054,10 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
                 *use_count.entry(*path).or_insert(0) += 1;
                 *use_count.entry(*val).or_insert(0) += 1;
             }
+            JitOp::PathProbe { input, path } => {
+                *use_count.entry(*input).or_insert(0) += 1;
+                *use_count.entry(*path).or_insert(0) += 1;
+            }
             JitOp::StrBufAppendVal { src } => { *use_count.entry(*src).or_insert(0) += 1; }
             JitOp::ThrowError { msg } => { *use_count.entry(*msg).or_insert(0) += 1; }
             JitOp::CollectRange { n, .. } => { *use_count.entry(*n).or_insert(0) += 1; }
@@ -10124,6 +10144,10 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
                     *use_count.entry(*container).or_insert(0) += 1;
                     *use_count.entry(*path).or_insert(0) += 1;
                     *use_count.entry(*val).or_insert(0) += 1;
+                }
+                JitOp::PathProbe { input, path } => {
+                    *use_count.entry(*input).or_insert(0) += 1;
+                    *use_count.entry(*path).or_insert(0) += 1;
                 }
                 JitOp::StrBufAppendVal { src } => { *use_count.entry(*src).or_insert(0) += 1; }
                 JitOp::ThrowError { msg } => { *use_count.entry(*msg).or_insert(0) += 1; }
@@ -10390,6 +10414,7 @@ impl JitCompiler {
             ("jit_rt_take_by_idx", jit_rt_take_by_idx as *const u8),
             ("jit_rt_put_by_idx", jit_rt_put_by_idx as *const u8),
             ("jit_rt_setpath_mut", jit_rt_setpath_mut as *const u8),
+            ("jit_rt_path_probe", jit_rt_path_probe as *const u8),
             ("jit_rt_collect_begin", jit_rt_collect_begin as *const u8),
             ("jit_rt_collect_push", jit_rt_collect_push as *const u8),
             ("jit_rt_collect_finish", jit_rt_collect_finish as *const u8),
@@ -11343,6 +11368,11 @@ impl JitCompiler {
                         let v = slot_addr(&mut b, *val);
                         b.ins().call(rt["setpath_mut"], &[c, p, v]);
                     }
+                    JitOp::PathProbe { input, path } => {
+                        let i = slot_addr(&mut b, *input);
+                        let p = slot_addr(&mut b, *path);
+                        b.ins().call(rt["path_probe"], &[i, p]);
+                    }
                     // Collect ops
                     JitOp::CollectBegin => {
                         b.ins().call(rt["collect_begin"], &[env_ptr]);
@@ -11868,6 +11898,7 @@ fn declare_rt_funcs(module: &mut JITModule, map: &mut HashMap<&'static str, Func
     decl!("take_by_idx", [p, p, p], []);
     decl!("put_by_idx", [p, p, p], []);
     decl!("setpath_mut", [p, p, p], []);
+    decl!("path_probe", [p, p], []);
     decl!("collect_begin", [p], []);
     decl!("collect_push", [p, p], []);
     decl!("collect_finish", [p, p], []);
@@ -12669,6 +12700,9 @@ impl JitProgram {
                 }
                 JitOp::SetPathMut { container, path, val } => {
                     jit_rt_setpath_mut(sp(*container), sp(*path), sp(*val));
+                }
+                JitOp::PathProbe { input, path } => {
+                    jit_rt_path_probe(sp(*input), sp(*path));
                 }
                 JitOp::CollectBegin => jit_rt_collect_begin(env_ptr),
                 JitOp::CollectPush { src } => jit_rt_collect_push(env_ptr, sp(*src)),
