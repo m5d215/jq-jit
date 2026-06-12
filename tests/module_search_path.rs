@@ -11,6 +11,16 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
+/// JSON-escape a filesystem path for embedding in an expected output
+/// string. Windows canonical paths (`\\?\C:\...`) contain backslashes,
+/// which `get_search_list` renders as `\\` — embedding the raw path made
+/// the assertion a Windows-only failure (caught by release.yml / the
+/// scheduled full-matrix CI, the only workflows that test on Windows).
+/// Same fix as tests/loc_module_file.rs.
+fn json_escaped(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 fn run(args: &[&str]) -> (String, bool) {
     let jq_jit = env!("CARGO_BIN_EXE_jq-jit");
     let mut child = Command::new(jq_jit)
@@ -58,7 +68,7 @@ fn get_search_list_reflects_dash_l() {
     let dir_s = dir.to_str().unwrap();
     // jq canonicalises a resolvable -L dir via realpath; mirror that here.
     let canon = std::fs::canonicalize(&dir).unwrap();
-    let canon_s = canon.to_str().unwrap();
+    let canon_s = json_escaped(canon.to_str().unwrap());
 
     let (out, ok) = run(&["-L", dir_s, "-c", "get_search_list"]);
     assert!(ok);
