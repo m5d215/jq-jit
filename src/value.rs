@@ -7228,7 +7228,7 @@ fn push_indent_bytes(buf: &mut Vec<u8>, n: usize, use_tab: bool) {
     }
 }
 
-fn push_compact_value(buf: &mut Vec<u8>, v: &Value) {
+pub(crate) fn push_compact_value(buf: &mut Vec<u8>, v: &Value) {
     match v {
         Value::Null => buf.extend_from_slice(b"null"),
         Value::False => buf.extend_from_slice(b"false"),
@@ -7289,7 +7289,7 @@ pub fn push_jq_number_bytes(buf: &mut Vec<u8>, n: f64) {
 }
 
 #[inline]
-fn push_json_string_to_vec(buf: &mut Vec<u8>, s: &str) {
+pub(crate) fn push_json_string_to_vec(buf: &mut Vec<u8>, s: &str) {
     let bytes = s.as_bytes();
     let len = bytes.len();
     // Ultra-fast path for single-byte strings (common object keys like "x", "y")

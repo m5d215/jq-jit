@@ -320,6 +320,150 @@ fn can_scalar_collect(expr: &Expr) -> bool {
     }
 }
 
+/// One segment of an output-fusion emit plan (#1058): either a constant
+/// JSON fragment (braces, pre-escaped keys, folded literals) or a hole — a
+/// single-valued scalar sub-expression whose runtime Value is serialized
+/// in place.
+enum EmitPart {
+    Frag(String),
+    Hole(Expr),
+}
+
+/// Build an emit plan for a tail-position construct, or `None` when the
+/// shape is not statically fusable (dynamic keys, duplicate keys,
+/// generator elements, non-scalar holes). Only object / array constructs
+/// are fused at the top — anything else gains nothing over the plain
+/// scalar lowering.
+fn build_emit_plan(expr: &Expr) -> Option<Vec<EmitPart>> {
+    if !matches!(expr, Expr::ObjectConstruct { .. } | Expr::Collect { .. }) {
+        return None;
+    }
+    let mut parts = Vec::new();
+    let mut frag = Vec::new();
+    if !emit_plan_node(expr, &mut parts, &mut frag) {
+        return None;
+    }
+    emit_plan_flush(&mut parts, &mut frag)?;
+    Some(parts)
+}
+
+fn emit_plan_flush(parts: &mut Vec<EmitPart>, frag: &mut Vec<u8>) -> Option<()> {
+    if !frag.is_empty() {
+        // Fragment bytes come from the canonical serializer over decoded
+        // keys/literals, so they are valid UTF-8 JSON text.
+        parts.push(EmitPart::Frag(String::from_utf8(std::mem::take(frag)).ok()?));
+    }
+    Some(())
+}
+
+/// Recursive plan builder for a construct node. Constant keys and literal
+/// values fold into the running fragment; nested constructs recurse;
+/// every other single-valued scalar becomes a hole.
+fn emit_plan_node(expr: &Expr, parts: &mut Vec<EmitPart>, frag: &mut Vec<u8>) -> bool {
+    match expr {
+        Expr::ObjectConstruct { pairs } => {
+            let keys: Vec<&str> = pairs
+                .iter()
+                .filter_map(|(k, _)| match k {
+                    Expr::Literal(Literal::Str(s)) => Some(s.as_str()),
+                    _ => None,
+                })
+                .collect();
+            // Literal distinct keys only: duplicates need jq's last-wins
+            // dedup, dynamic keys need runtime string checks — both stay
+            // on the plain construct lowering. Keys are parser-decoded, so
+            // this comparison also catches escape-aliased duplicates.
+            if keys.len() != pairs.len() {
+                return false;
+            }
+            {
+                let mut uniq = keys.clone();
+                uniq.sort_unstable();
+                uniq.dedup();
+                if uniq.len() != keys.len() {
+                    return false;
+                }
+            }
+            frag.push(b'{');
+            for (i, (_, v)) in pairs.iter().enumerate() {
+                if i > 0 {
+                    frag.push(b',');
+                }
+                crate::value::push_json_string_to_vec(frag, keys[i]);
+                frag.push(b':');
+                if !emit_plan_value(v, parts, frag) {
+                    return false;
+                }
+            }
+            frag.push(b'}');
+            true
+        }
+        Expr::Collect { generator } => {
+            // A static comma-list with strictly single-valued elements is
+            // the only array shape whose element count (and thus comma
+            // placement) is known at compile time. `empty` elements vanish.
+            let mut elems = Vec::new();
+            collect_comma_elements(generator, &mut elems);
+            frag.push(b'[');
+            for (i, e) in elems.iter().enumerate() {
+                if i > 0 {
+                    frag.push(b',');
+                }
+                if !emit_plan_value(e, parts, frag) {
+                    return false;
+                }
+            }
+            frag.push(b']');
+            true
+        }
+        _ => false,
+    }
+}
+
+fn collect_comma_elements<'a>(gen: &'a Expr, out: &mut Vec<&'a Expr>) {
+    match gen {
+        Expr::Comma { left, right } => {
+            collect_comma_elements(left, out);
+            collect_comma_elements(right, out);
+        }
+        Expr::Empty => {}
+        other => out.push(other),
+    }
+}
+
+fn emit_plan_value(expr: &Expr, parts: &mut Vec<EmitPart>, frag: &mut Vec<u8>) -> bool {
+    match expr {
+        Expr::ObjectConstruct { .. } | Expr::Collect { .. } => {
+            // Nested static constructs flatten into the same plan — this is
+            // where fusion beats the plain lowering most (no intermediate
+            // ObjMap / Vec<Value> per record).
+            emit_plan_node(expr, parts, frag)
+        }
+        Expr::Literal(lit) => {
+            // Fold the literal into the fragment with the same serializer
+            // the runtime path would use on the equivalent Value (repr
+            // canonicalization included), so bytes cannot diverge.
+            let val = match lit {
+                Literal::Null => Value::Null,
+                Literal::True => Value::True,
+                Literal::False => Value::False,
+                Literal::Num(n, repr) => Value::number_opt(*n, repr.clone()),
+                Literal::Str(s) => Value::Str(crate::value::KeyStr::from(s.as_str())),
+            };
+            crate::value::push_compact_value(frag, &val);
+            true
+        }
+        _ if is_scalar(expr) => {
+            if emit_plan_flush(parts, frag).is_none() {
+                return false;
+            }
+            parts.push(EmitPart::Hole(expr.clone()));
+            true
+        }
+        _ => false,
+    }
+}
+
 /// True when a `range` seed expression may carry a literal repr the first
 /// yielded value must preserve (#1083). Only a reprless number literal —
 /// the common `range(N)` / `range(0; n)` shape — is provably repr-free;
@@ -559,6 +703,23 @@ enum JitOp {
     /// `emit_yield` plants after native yields, but batched per call.
     DelegateGen { input: SlotId, expr_idx: usize, push: bool, limit: Option<(u32, u32, LabelId)> },
 
+    // Output fusion (#1058): a statically-shaped tail construct (object /
+    // array with literal keys and single-valued holes) lowers to an emit
+    // plan that writes compact JSON bytes into `JitEnv::emit_buf` directly,
+    // skipping output-side Value materialization. All hole values are
+    // computed into slots *before* the first Emit op, so the emit sequence
+    // itself is infallible and the buffer never holds a partial record.
+    // The host drains the buffer after each execution (`drain_emit_buf`).
+    /// Append a constant JSON fragment (pre-rendered at compile time with
+    /// the canonical serializer) to the emit buffer.
+    EmitFrag { bytes: String },
+    /// Serialize the slot's Value compactly into the emit buffer via
+    /// `push_compact_value` — the same serializer the generic output path
+    /// uses, so fused and non-fused bytes are identical by construction.
+    EmitVal { src: SlotId },
+    /// Terminate one fused output record (trailing newline).
+    EmitEnd,
+
     // Control flow
     IfTruthy { src: SlotId, then_label: LabelId, else_label: LabelId },
     /// Combined field access + truthiness check: avoids clone+drop of the field value.
@@ -782,6 +943,11 @@ struct Flattener {
     /// Flattener (same lifetime argument as `funcs_body_block`); consumed
     /// by `funcs_bodies_close_over_vars_outside`.
     funcs_body_closure_vars: Option<Rc<Vec<VarIdx>>>,
+    /// Output fusion enabled for this lowering (#1058): tail-position
+    /// static constructs lower to Emit ops instead of build-then-Yield.
+    /// Set by `flatten_filter` from the host's `set_output_fusion` knob;
+    /// cleared on the mixed-yield retry.
+    output_fusion: bool,
 }
 
 impl Flattener {
@@ -794,7 +960,7 @@ impl Flattener {
                      is_test: false, has_unresolved_recursion: false,
                      emitted_delegate: false, inline_exempt: HashSet::new(),
                      recursion_detected: HashSet::new(), funcs_body_block: None,
-                     funcs_body_closure_vars: None }
+                     funcs_body_closure_vars: None, output_fusion: false }
     }
 
     /// Materialize a Literal into a heap-allocated Value and return a stable pointer.
@@ -834,6 +1000,7 @@ impl Flattener {
         t.inline_exempt = self.inline_exempt.clone();
         t.funcs_body_block = self.funcs_body_block;
         t.funcs_body_closure_vars = self.funcs_body_closure_vars.clone();
+        t.output_fusion = self.output_fusion;
         t
     }
 
@@ -1502,6 +1669,72 @@ impl Flattener {
             limit: limit_payload,
         });
         true
+    }
+
+    /// True when `expr` is a construct with a static emit plan, possibly
+    /// under scalar pipe prefixes (`f | {…}` — the common `select(c) | {…}`
+    /// shape lowers its then-branch as `. | {…}`). Pure pre-check: the
+    /// fusion hook must know the tail is fusable *before* emitting any
+    /// prefix ops, since a failed attempt falls back to the plain lowering.
+    fn has_fusable_tail(expr: &Expr) -> bool {
+        if build_emit_plan(expr).is_some() {
+            return true;
+        }
+        match expr {
+            Expr::Pipe { left, right } => is_scalar(left) && Self::has_fusable_tail(right),
+            _ => false,
+        }
+    }
+
+    /// Lower a fusable tail (see `has_fusable_tail`): peel scalar pipe
+    /// prefixes into intermediate slots, then emit the construct plan
+    /// against the final input. Caller must have checked
+    /// `has_fusable_tail` — this only returns `false` on that contract
+    /// being violated (no ops are emitted in that case beyond the prefix).
+    fn lower_fused_tail(&mut self, expr: &Expr, input_slot: SlotId) -> bool {
+        if let Some(parts) = build_emit_plan(expr) {
+            self.lower_emit_plan(&parts, input_slot);
+            return true;
+        }
+        if let Expr::Pipe { left, right } = expr {
+            if is_scalar(left) && Self::has_fusable_tail(right) {
+                if matches!(left.as_ref(), Expr::Input) {
+                    return self.lower_fused_tail(right, input_slot);
+                }
+                let mid = self.flatten_scalar(left, input_slot);
+                let ok = self.lower_fused_tail(right, mid);
+                self.emit(JitOp::Drop { slot: mid });
+                return ok;
+            }
+        }
+        false
+    }
+
+    /// Lower an emit plan (#1058): compute every hole into a slot first —
+    /// the holes carry all the fallible ops, and any error aborts before a
+    /// single byte is emitted — then run the infallible Emit sequence and
+    /// release the hole slots.
+    fn lower_emit_plan(&mut self, parts: &[EmitPart], input_slot: SlotId) {
+        let mut hole_slots = Vec::new();
+        for p in parts {
+            if let EmitPart::Hole(e) = p {
+                hole_slots.push(self.flatten_scalar(e, input_slot));
+            }
+        }
+        let mut hi = 0;
+        for p in parts {
+            match p {
+                EmitPart::Frag(s) => self.emit(JitOp::EmitFrag { bytes: s.clone() }),
+                EmitPart::Hole(_) => {
+                    self.emit(JitOp::EmitVal { src: hole_slots[hi] });
+                    hi += 1;
+                }
+            }
+        }
+        self.emit(JitOp::EmitEnd);
+        for s in hole_slots {
+            self.emit(JitOp::Drop { slot: s });
+        }
     }
 
     fn emit_yield(&mut self, output: SlotId) {
@@ -2878,6 +3111,21 @@ impl Flattener {
                 let _ = test.flatten_scalar(expr, t_in);
                 if test.has_unresolved_recursion {
                     return self.emit_delegate_gen(expr, input_slot, false);
+                }
+            }
+            // Output fusion (#1058): a tail-position static construct
+            // writes its JSON bytes straight into the emit buffer instead
+            // of materializing the output Value. Only at the top stream
+            // level (collect depth 0) and outside `limit` (whose counter
+            // bookkeeping hangs off Yield ops). If any *other* yield site
+            // in the program emits through the callback, `flatten_filter`
+            // detects the mix and re-lowers without fusion, so the host's
+            // append-after-execute drain can never reorder outputs.
+            if self.output_fusion && self.collect_depth == 0 && self.limit_state.is_none()
+                && Self::has_fusable_tail(expr)
+            {
+                if self.lower_fused_tail(expr, input_slot) {
+                    return true;
                 }
             }
             let out = self.flatten_scalar(expr, input_slot);
@@ -8987,6 +9235,27 @@ extern "C" fn jit_rt_obj_copy_field(
     }
 }
 
+// Output-fusion emit helpers (#1058). All infallible: the lowering
+// computes every hole value before the first emit op, so by the time
+// these run the record is guaranteed to complete.
+extern "C" fn jit_rt_emit_frag(env: *mut JitEnv, ptr: *const u8, len: usize) {
+    unsafe {
+        (*env).emit_buf.extend_from_slice(std::slice::from_raw_parts(ptr, len));
+    }
+}
+
+extern "C" fn jit_rt_emit_val(env: *mut JitEnv, val: *const Value) {
+    unsafe {
+        crate::value::push_compact_value(&mut (*env).emit_buf, &*val);
+    }
+}
+
+extern "C" fn jit_rt_emit_end(env: *mut JitEnv) {
+    unsafe {
+        (*env).emit_buf.push(b'\n');
+    }
+}
+
 /// Batch field extraction: build a new object from multiple fields of src in a single pass.
 /// pair_table is an array of (out_key_ptr, out_key_len, src_field_ptr, src_field_len) tuples.
 /// Replaces ObjNew + N×ObjCopyField with a single function call, scanning the source once.
@@ -9963,6 +10232,13 @@ pub struct JitEnv {
     /// via `env_ptr + offset_of!(JitEnv, error_flag)` in `CheckError` /
     /// `JumpIfError`, avoiding an embedded static address.
     pub error_flag: i64,
+    /// Output-fusion staging buffer (#1058): Emit ops append complete
+    /// compact JSON records here; the host moves them into its output
+    /// buffer via `drain_emit_buf` after each execution. Never cleared by
+    /// `with_jit_env` — the emit sequence is infallible and record-atomic,
+    /// so the buffer only ever holds whole records, and the drain owns the
+    /// lifecycle.
+    pub emit_buf: Vec<u8>,
 }
 
 impl Default for JitEnv {
@@ -9980,6 +10256,7 @@ impl JitEnv {
             try_depth: 0,
             error: None,
             error_flag: 0,
+            emit_buf: Vec::new(),
         }
     }
 }
@@ -10015,6 +10292,7 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
                 *use_count.entry(*src).or_insert(0) += 1;
             }
             JitOp::CollectPush { src } => { *use_count.entry(*src).or_insert(0) += 1; }
+            JitOp::EmitVal { src } => { *use_count.entry(*src).or_insert(0) += 1; }
             JitOp::ObjInsert { obj, key, val } => {
                 *use_count.entry(*obj).or_insert(0) += 1;
                 *use_count.entry(*key).or_insert(0) += 1;
@@ -10106,6 +10384,7 @@ fn optimize_clone_yield(mut ops: Vec<JitOp>) -> Vec<JitOp> {
                     *use_count.entry(*src).or_insert(0) += 1;
                 }
                 JitOp::CollectPush { src } => { *use_count.entry(*src).or_insert(0) += 1; }
+                JitOp::EmitVal { src } => { *use_count.entry(*src).or_insert(0) += 1; }
                 JitOp::ObjInsert { obj, key, val } => {
                     *use_count.entry(*obj).or_insert(0) += 1;
                     *use_count.entry(*key).or_insert(0) += 1;
@@ -10280,7 +10559,12 @@ fn observes_interleaved_input_state(expr: &Expr) -> bool {
 /// linear JitOp sequence, publish closure ops for runtime delegation, and
 /// run the clone+yield peephole pass.
 fn flatten_filter(expr: &Expr, funcs: &[CompiledFunc]) -> Result<FlattenedFilter> {
+    flatten_filter_with_fusion(expr, funcs, output_fusion_enabled())
+}
+
+fn flatten_filter_with_fusion(expr: &Expr, funcs: &[CompiledFunc], fuse: bool) -> Result<FlattenedFilter> {
     let mut fl = Flattener::new();
+    fl.output_fusion = fuse;
     fl.funcs = funcs.to_vec();
     // Pre-inline function calls and apply semantic optimizations.
     // Always run to catch to_entries|from_entries and similar rewrites.
@@ -10312,6 +10596,24 @@ fn flatten_filter(expr: &Expr, funcs: &[CompiledFunc]) -> Result<FlattenedFilter
     // Bail here so the binary falls back to the interpreter.
     if fl.has_unresolved_recursion {
         bail!("Expression not JIT-compilable: subtree requested bailout");
+    }
+    // Output fusion sanity (#1058): fused records land in the env emit
+    // buffer (drained by the host after the execution), while plain
+    // yields stream through the callback during it. A program mixing
+    // both — `({a:1}, .x)`, a fused `try` with a plain `catch`, a pull
+    // delegate next to a fused branch — would emit out of order, so
+    // re-lower the whole filter with fusion off.
+    if fuse {
+        let has_emit = fl.ops.iter().any(|op| matches!(op, JitOp::EmitEnd));
+        let has_plain_yield = fl.ops.iter().any(|op| matches!(op,
+            JitOp::Yield { .. } | JitOp::YieldFieldRef { .. }
+            | JitOp::DelegateGen { push: false, .. }));
+        if has_emit && has_plain_yield {
+            return flatten_filter_with_fusion(expr, funcs, false);
+        }
+        if has_emit {
+            OUTPUT_FUSION_ACTIVE.with(|c| c.set(true));
+        }
     }
     fl.emit(JitOp::ReturnContinue);
 
@@ -10424,6 +10726,9 @@ impl JitCompiler {
             ("jit_rt_obj_push_str_key", jit_rt_obj_push_str_key as *const u8),
             ("jit_rt_obj_copy_field", jit_rt_obj_copy_field as *const u8),
             ("jit_rt_obj_from_fields", jit_rt_obj_from_fields as *const u8),
+            ("jit_rt_emit_frag", jit_rt_emit_frag as *const u8),
+            ("jit_rt_emit_val", jit_rt_emit_val as *const u8),
+            ("jit_rt_emit_end", jit_rt_emit_end as *const u8),
             ("jit_rt_is_null_or_false", jit_rt_is_null_or_false as *const u8),
             ("jit_rt_to_f64", jit_rt_to_f64 as *const u8),
             ("jit_rt_to_f64_range_bound", jit_rt_to_f64_range_bound as *const u8),
@@ -11096,6 +11401,20 @@ impl JitCompiler {
                         let two_64 = b.ins().iconst(ptr_ty, 2);
                         let result = b.ins().select(is_truthy, one, two_64);
                         b.ins().store(cranelift_codegen::ir::MemFlags::new(), result, d, 0);
+                    }
+                    JitOp::EmitFrag { bytes } => {
+                        let leaked = Box::leak(bytes.clone().into_boxed_str());
+                        self._string_constants.push(leaked);
+                        let fp = b.ins().iconst(ptr_ty, leaked.as_ptr() as i64);
+                        let fl = b.ins().iconst(ptr_ty, leaked.len() as i64);
+                        b.ins().call(rt["emit_frag"], &[env_ptr, fp, fl]);
+                    }
+                    JitOp::EmitVal { src } => {
+                        let s = slot_addr(&mut b, *src);
+                        b.ins().call(rt["emit_val"], &[env_ptr, s]);
+                    }
+                    JitOp::EmitEnd => {
+                        b.ins().call(rt["emit_end"], &[env_ptr]);
                     }
                     JitOp::Yield { output } => {
                         let oa = slot_addr(&mut b, *output);
@@ -11908,6 +12227,9 @@ fn declare_rt_funcs(module: &mut JITModule, map: &mut HashMap<&'static str, Func
     decl!("obj_push_str_key", [p, p, p, p], []);
     decl!("obj_copy_field", [p, p, p, p, p, p], []);
     decl!("obj_from_fields", [p, p, p, p], []);
+    decl!("emit_frag", [p, p, p], []);
+    decl!("emit_val", [p, p], []);
+    decl!("emit_end", [p], []);
     decl!("is_null_or_false", [p], [p]);
     decl!("to_f64", [p], [f]);
     decl!("to_f64_range_bound", [p], [f]);
@@ -12032,6 +12354,59 @@ unsafe extern "C" fn collect_callback(value: *const Value, ctx: *mut u8) -> i64 
 // vector on every `execute_jit` call.
 thread_local! {
     static REUSABLE_ENV: UnsafeCell<Option<JitEnv>> = const { UnsafeCell::new(None) };
+}
+
+// Output-fusion knob (#1058). The host enables it before compiling its
+// top-level filter when — and only when — it commits to (a) compact
+// buffered output with no per-value flags (`-r`/`-S`/`-C`/`-e`/`--seq`)
+// and (b) draining the emit buffer after every execution. Filters
+// compiled while the knob is off (tests, probes in other contexts) lower
+// exactly as before.
+thread_local! {
+    static OUTPUT_FUSION: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Enable output fusion for filters compiled after this call (#1058).
+/// Contract: the caller must drain the emit buffer (`drain_emit_buf`)
+/// into its output stream after every `execute_cb` of a filter compiled
+/// with the knob on — fused programs do not stream their outputs through
+/// the yield callback.
+pub fn set_output_fusion(on: bool) {
+    OUTPUT_FUSION.with(|c| c.set(on));
+}
+
+fn output_fusion_enabled() -> bool {
+    OUTPUT_FUSION.with(|c| c.get())
+}
+
+// Latched by the shared lowering when a compiled program actually
+// contains Emit ops, so the host can skip the per-record drain (a TLS
+// access, ~4ns/record on the 2M NDJSON loop) for the overwhelming
+// majority of filters that lower without fusion. Never cleared: a stale
+// `true` (e.g. a discarded probe) only costs the no-op drain.
+thread_local! {
+    static OUTPUT_FUSION_ACTIVE: Cell<bool> = const { Cell::new(false) };
+}
+
+/// True when some compiled program on this thread lowered with output
+/// fusion — i.e. `drain_emit_buf` may have bytes to move.
+pub fn output_fusion_active() -> bool {
+    OUTPUT_FUSION_ACTIVE.with(|c| c.get())
+}
+
+/// Move any fused output records produced by the last execution into
+/// `into` (#1058). No-op when the thread never ran a fused program or the
+/// buffer is already drained.
+pub fn drain_emit_buf(into: &mut Vec<u8>) {
+    REUSABLE_ENV.with(|cell| {
+        let env_opt = unsafe { &mut *cell.get() };
+        if let Some(env) = env_opt {
+            if !env.emit_buf.is_empty() {
+                into.extend_from_slice(&env.emit_buf);
+                env.emit_buf.clear();
+            }
+        }
+    })
 }
 
 /// Copy live LoadVar bindings from the JIT env into the eval Env before we delegate
@@ -12579,6 +12954,15 @@ impl JitProgram {
                 }
                 JitOp::Not { dst, src } => {
                     jit_rt_not(sp(*dst), sp(*src));
+                }
+                JitOp::EmitFrag { bytes } => {
+                    jit_rt_emit_frag(env_ptr, bytes.as_ptr(), bytes.len());
+                }
+                JitOp::EmitVal { src } => {
+                    jit_rt_emit_val(env_ptr, sp(*src));
+                }
+                JitOp::EmitEnd => {
+                    jit_rt_emit_end(env_ptr);
                 }
                 JitOp::Yield { output } => {
                     let r = unsafe { cb(sp(*output), ctx) };

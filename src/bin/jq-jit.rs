@@ -2933,6 +2933,22 @@ fn real_main() {
         None
     };
 
+    // Output fusion (#1058): when the output mode is the plain buffered
+    // compact stream — no raw/sorted/colored/joined output, no `-e` exit
+    // status (it inspects each output Value), no `--seq` RS framing, and
+    // no slurp (fused records stage in the env buffer until the host
+    // drains after each execution; a slurped giant input would stage its
+    // whole output) — tail-position static constructs may compile to
+    // direct byte emission. `process_input` below drains the staged bytes
+    // into `compact_buf` after every execution; outputs that still stream
+    // through the callback are unaffected (a compiled program is either
+    // fully fused or not fused at all).
+    let output_fusion = compact && !raw_output && !sort_keys && !join_output
+        && !color_output && !seq && !exit_status && !slurp;
+    if output_fusion {
+        jq_jit::jit::set_output_fusion(true);
+    }
+
     // Lazy JIT: compile only when input is large enough to amortize compilation cost.
     // Exception: always JIT for loop constructs (reduce/foreach/while/until/recurse)
     // since their runtime dominates regardless of input size.
@@ -3006,6 +3022,9 @@ fn real_main() {
     if !force_interp && !force_jit && !force_jitop && !force_cranelift && !filter.has_jit() {
         filter.compile_jitop_program_for_routing();
     }
+    // Drain fused output only when some compiled program actually lowered
+    // with Emit ops — every other filter skips the per-record TLS access.
+    let output_fusion = output_fusion && jq_jit::jit::output_fusion_active();
 
     // Use Vec-based buffering for compact output to avoid per-value write_all overhead
     let use_compact_buf = compact && !raw_output && !sort_keys && !join_output;
@@ -3832,6 +3851,20 @@ fn real_main() {
             }
             Ok(true)
         });
+        // Output fusion (#1058): fused programs stage complete records in
+        // the JIT env's emit buffer instead of streaming Values through
+        // the callback above. Move them into the compact buffer now — the
+        // emit sequence is record-atomic, so even an error mid-execution
+        // leaves only whole records here (matching jq's
+        // print-outputs-then-error behavior). Must run before the halt
+        // drain below so `halt` flushes fused output too.
+        if output_fusion {
+            jq_jit::jit::drain_emit_buf(cbuf);
+            if cbuf.len() >= 1 << 17 {
+                let _ = out.write_all(cbuf);
+                cbuf.clear();
+            }
+        }
         // --unbuffered: flush after every input so consumers get
         // results as they're produced rather than waiting for the
         // 64KB BufWriter to fill.
