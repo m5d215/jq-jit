@@ -2647,9 +2647,17 @@ fn emit_resolved_value(
                                 buf.extend_from_slice(content);
                             }
                         } else {
-                            // Number/bool/null — tostring form; a NaN/Infinity
-                            // or non-canonical lexeme re-renders (#1021).
-                            push_interp_num_canon(buf, val);
+                            // Number/bool/null/composite — tostring form. Bare
+                            // numbers canonicalise (NaN/Infinity/non-canonical
+                            // lexemes re-render, #1021); composites re-render
+                            // nested non-canonical numbers and escape their
+                            // inner `"`/`\` for embedding so the surrounding
+                            // string stays valid JSON (#1127).
+                            if strings_clean {
+                                emit_interp_field_raw_clean(buf, val);
+                            } else {
+                                emit_interp_field_raw(buf, val);
+                            }
                         }
                     }
                     ResolvedStringChainPart::FieldArithToString(idx, ref ops) => {
