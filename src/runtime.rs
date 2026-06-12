@@ -2746,6 +2746,39 @@ fn rt_pow(a: &Value, b: &Value) -> Result<Value> {
     }
 }
 
+/// Validate that `path` navigates `v` without a type error, by reference.
+///
+/// Semantically identical to `rt_getpath(v, path).map(|_| ())` — the JIT
+/// `path(<simple path>)` lowering runs this for effect so `5 | path(.[0])`
+/// raises "Cannot index number with number" exactly like eval (#1085) —
+/// but the happy path clones nothing. The arms that produce fresh values
+/// (slices, `.[arr]` indices) or any error delegate to `rt_getpath` so the
+/// behavior and wording stay identical by construction.
+pub fn rt_path_probe(v: &Value, path: &Value) -> Result<()> {
+    let Value::Arr(p) = path else {
+        return rt_getpath(v, path).map(|_| ());
+    };
+    let null = Value::Null;
+    let mut current: &Value = v;
+    for key in p.iter() {
+        match (current, key) {
+            (Value::Obj(ObjInner(o)), Value::Str(k)) => {
+                current = o.get(k.as_str()).unwrap_or(&null);
+            }
+            (Value::Arr(a), Value::Num(n, _)) => {
+                current = crate::value::resolve_array_index(*n, a.len())
+                    .map(|i| &a[i])
+                    .unwrap_or(&null);
+            }
+            (Value::Null, Value::Str(_) | Value::Num(_, _) | Value::Obj(_)) => {
+                current = &null;
+            }
+            _ => return rt_getpath(v, path).map(|_| ()),
+        }
+    }
+    Ok(())
+}
+
 pub fn rt_getpath(v: &Value, path: &Value) -> Result<Value> {
     match path {
         Value::Arr(p) => {
