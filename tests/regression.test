@@ -14102,3 +14102,74 @@ null
 [919895839836842.3 + 0] | @csv
 null
 "919895839836842.2"
+
+# #1058: output fusion — nested static construct emits bytes directly (jit-routed)
+{a: {b: .x}}
+{"x":1}
+{"a":{"b":1}}
+
+# #1058: fused array-of-objects collect
+[{a: .x, b: .y}]
+{"x":1,"y":2}
+[{"a":1,"b":2}]
+
+# #1058: deep static nesting with literal folding
+{a: .x, b: {c: [.y, {d: .name}], e: 1}}
+{"x":1,"y":2,"name":"n"}
+{"a":1,"b":{"c":[2,{"d":"n"}],"e":1}}
+
+# #1058: literal values fold through the canonical serializer (repr, escapes)
+{a: 1e3, b: [0.1, -0], c: "li\"t\n", d: null}
+null
+{"a":1E+3,"b":[0.1,0],"c":"li\"t\n","d":null}
+
+# #1058: escape canonicalization through a fused string hole (solidus, control escape)
+{k: .s}
+{"s":"a\/bA\t"}
+{"k":"a/bA\t"}
+
+# #1058: number canonicalization through a fused hole
+{n: .v}
+{"v":1e3}
+{"n":1E+3}
+
+# #1058: composite hole re-serializes via the shared compact serializer
+{o: .v}
+{"v":{"q":"x\"y","a":[1,"\/"]}}
+{"o":{"q":"x\"y","a":[1,"/"]}}
+
+# #1058: mixed plain+construct outputs retreat from fusion, order preserved
+({a:.x}, .x)
+{"x":7}
+{"a":7}
+7
+
+# #1058: fused branch beside an empty branch
+if .x > 1 then {hit: .x} else empty end
+{"x":2}
+{"hit":2}
+
+# #1058: missing field hole emits null
+{m: .missing}
+{}
+{"m":null}
+
+# #1058: nested arrays and objects in one fused plan
+[{a: .x}, {b: 2}, [3, {c: .y}]]
+{"x":1,"y":4}
+[{"a":1},{"b":2},[3,{"c":4}]]
+
+# #1058: hole error aborts before any byte is emitted (catch yields instead)
+try {a: (.x + 1)} catch {err: 1}
+{"x":"s"}
+{"err":1}
+
+# #1058: scalar pipe prefix peels into the fused tail (select-then-construct)
+select(.x > 100) | {a: {b: .x}}
+{"x":200}
+{"a":{"b":200}}
+
+# #1058: pipe prefix with a computed mid value feeding the fused construct
+.x + 1 | {v: ., w: [.]}
+{"x":2}
+{"v":3,"w":[3]}

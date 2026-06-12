@@ -536,6 +536,34 @@ construct / cond-chain）は、フィールド境界スキャン
   融合済みなので、新しい per-value ゲートを足す時は classify に
   畳めないか先に検討する。
 
+### Output fusion（#1058 emit plan）の契約
+
+generic（JIT 経由）出力で tail-position の静的 construct（literal key の
+object / 静的 comma-list の array、ネスト可）は、`jit.rs::build_emit_plan`
+が「定数 JSON 断片 + 単一値 hole」の emit plan に lower し、両 backend が
+`JitEnv::emit_buf` に直接 compact バイトを書く（`EmitFrag` / `EmitVal` /
+`EmitEnd`）。host（`bin/jq-jit.rs::process_input`）は execute 後に
+`drain_emit_buf` で出力バッファへ転写する。
+
+- **opt-in**: `jit::set_output_fusion(true)` を立てた状態でコンパイルした
+  プログラムだけが fuse する。host は compact buffered 出力（`-c` 系で
+  `-r`/`-S`/`-C`/`-j`/`-e`/`--seq`/slurp なし）の時のみ立てる。
+- **all-or-nothing**: fused プログラムは全出力が emit 経由。plain Yield
+  （callback 経由）と混在する flatten 結果は `flatten_filter` が検知して
+  fusion なしで再 lower する。**部分 fusion を許すと
+  append-after-execute の drain が出力順を壊す**ので、この再試行を
+  外さないこと。
+- **record-atomic**: hole 値の計算（fallible）は全て最初の Emit op より
+  前。emit 列自体は infallible なので、エラー時に emit_buf へ部分
+  レコードが残ることはない。新しい Emit 系 op を足すなら同じ規約で
+  （emit 列に fallible op を挟まない）。
+- **byte parity**: 断片はコンパイル時に `push_json_string_to_vec` /
+  `push_compact_value` で描画、hole は実行時に `push_compact_value` ——
+  generic 出力（`push_compact_line`）と同一 serializer なので byte 一致が
+  構成的に保証される。escape / number-canon 処理を emit 側に複製しない。
+  `tests/contract_emit_fusion.rs` が両 backend の byte parity・mixed
+  retreat・record-atomicity を pin する。
+
 ### `paths` / `paths(f)` は root を落とす
 
 jq の `paths` は `path(..) | select(length > 0)`。scalar 入力で空 path `[]` を yield しない。派生する `paths(f)` も同じ不変性を持つ。rewrite を書き直す時は `length > 0` の guard を必ず最後に挟む。
