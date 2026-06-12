@@ -69,7 +69,8 @@ use crate::value::{
     KeyStr, Value, ObjInner, json_each_value_cb, json_object_assign_field_arith,
     json_object_assign_two_fields_arith, json_object_del_field, json_object_del_fields,
     json_object_filter_by_key_str, json_object_filter_by_value_type,
-    json_object_get_field_raw, json_object_get_fields_raw_buf, json_object_merge_literal,
+    json_object_get_field_raw, json_object_get_field_raw_classified,
+    json_object_get_fields_raw_buf, json_object_merge_literal,
     json_object_values_tostring, json_with_entries_select_value_cmp, push_tojson_raw,
     raw_contains_non_canonical_number,
     json_object_get_nested_field_raw, json_object_get_num, json_object_get_two_nums,
@@ -632,39 +633,44 @@ where
 /// returned [`RawApplyOutcome`].
 ///
 /// * Object input, field present, value is a quoted string with no `\`
-///   escapes — invokes `on_value(val_with_quotes, Some(content))`.
+///   escapes — invokes `on_value(val_with_quotes, Some(content), clean)`.
 /// * Object input, field present, value is a non-string scalar
 ///   (number / bool / null / array / object literal) — invokes
-///   `on_value(val_bytes, None)`. The closure decides whether to emit
-///   or to return [`RawApplyOutcome::Bail`] (e.g. `@base64` returns
+///   `on_value(val_bytes, None, clean)`. The closure decides whether to
+///   emit or to return [`RawApplyOutcome::Bail`] (e.g. `@base64` returns
 ///   Bail, `@json` returns Emit after wrapping the raw bytes).
 /// * Field absent, or value is a quoted string with at least one `\`
 ///   escape — returns [`RawApplyOutcome::Bail`] without invoking the
 ///   closure (the generic path decodes the escape / raises the error).
 /// * Non-object input — returns [`RawApplyOutcome::Bail`] (the field
 ///   fetch fails).
+///
+/// `clean` is the extraction walk's verbatim-safety verdict for the value
+/// (see `skip_json_value_classify`): when true, the lexeme carries no
+/// non-canonical number shape, no escape jq would re-encode, and no DEL
+/// byte, so the apply site can emit it without any per-value scan (#1077).
 pub fn apply_field_format_raw<F>(
     raw: &[u8],
     field: &str,
     on_value: F,
 ) -> RawApplyOutcome
 where
-    F: FnOnce(&[u8], Option<&[u8]>) -> RawApplyOutcome,
+    F: FnOnce(&[u8], Option<&[u8]>, bool) -> RawApplyOutcome,
 {
-    let (vs, ve) = match json_object_get_field_raw(raw, 0, field) {
+    let (vs, ve, clean) = match json_object_get_field_raw_classified(raw, 0, field) {
         Some(r) => r,
         None => return RawApplyOutcome::Bail,
     };
     let val = &raw[vs..ve];
     let content = if val.len() >= 2 && val[0] == b'"' && val[val.len() - 1] == b'"' {
-        if val[1..val.len() - 1].contains(&b'\\') {
+        if !clean && val[1..val.len() - 1].contains(&b'\\') {
             return RawApplyOutcome::Bail;
         }
         Some(&val[1..val.len() - 1])
     } else {
         None
     };
-    on_value(val, content)
+    on_value(val, content, clean)
 }
 
 /// Apply the `.field | ltrimstr("prefix") | tonumber [ | <arith> ]*`

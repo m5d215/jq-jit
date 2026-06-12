@@ -1546,19 +1546,19 @@ fn raw_field_scan_non_object_input_bails() {
 
 #[test]
 fn raw_field_format_string_value_emits() {
-    let mut seen: Vec<(Vec<u8>, Option<Vec<u8>>)> = Vec::new();
+    let mut seen: Vec<(Vec<u8>, Option<Vec<u8>>, bool)> = Vec::new();
     let outcome = apply_field_format_raw(
         b"{\"x\":\"hi\"}",
         "x",
-        |val, content| {
-            seen.push((val.to_vec(), content.map(|c| c.to_vec())));
+        |val, content, clean| {
+            seen.push((val.to_vec(), content.map(|c| c.to_vec()), clean));
             RawApplyOutcome::Emit
         },
     );
     assert!(matches!(outcome, RawApplyOutcome::Emit));
     assert_eq!(
         seen,
-        vec![(b"\"hi\"".to_vec(), Some(b"hi".to_vec()))],
+        vec![(b"\"hi\"".to_vec(), Some(b"hi".to_vec()), true)],
     );
 }
 
@@ -1567,18 +1567,24 @@ fn raw_field_format_non_string_scalar_invokes_with_none() {
     // The helper hands the closure `(val, None)` for non-string scalars; the
     // closure decides whether to Emit (e.g. @json wraps raw bytes) or Bail
     // (e.g. @base64 raises on non-string).
-    for (input, expected_val) in [
-        (&b"{\"x\":42}"[..], &b"42"[..]),
-        (&b"{\"x\":null}"[..], &b"null"[..]),
-        (&b"{\"x\":true}"[..], &b"true"[..]),
+    for (input, expected_val, expected_clean) in [
+        (&b"{\"x\":42}"[..], &b"42"[..], true),
+        (&b"{\"x\":null}"[..], &b"null"[..], true),
+        (&b"{\"x\":true}"[..], &b"true"[..], true),
+        // Non-canonical lexemes still invoke the closure, but classify
+        // dirty so the apply site keeps its canonicalisation gates (#1077).
+        (&b"{\"x\":1e3}"[..], &b"1e3"[..], false),
+        (&b"{\"x\":nan}"[..], &b"nan"[..], false),
+        // Composites always classify dirty.
+        (&b"{\"x\":[1,2]}"[..], &b"[1,2]"[..], false),
     ] {
-        let mut seen: Vec<(Vec<u8>, Option<Vec<u8>>)> = Vec::new();
-        let outcome = apply_field_format_raw(input, "x", |val, content| {
-            seen.push((val.to_vec(), content.map(|c| c.to_vec())));
+        let mut seen: Vec<(Vec<u8>, Option<Vec<u8>>, bool)> = Vec::new();
+        let outcome = apply_field_format_raw(input, "x", |val, content, clean| {
+            seen.push((val.to_vec(), content.map(|c| c.to_vec()), clean));
             RawApplyOutcome::Emit
         });
         assert!(matches!(outcome, RawApplyOutcome::Emit));
-        assert_eq!(seen, vec![(expected_val.to_vec(), None)]);
+        assert_eq!(seen, vec![(expected_val.to_vec(), None, expected_clean)]);
     }
 }
 
@@ -1589,7 +1595,7 @@ fn raw_field_format_propagates_closure_bail_verdict() {
     let outcome = apply_field_format_raw(
         b"{\"x\":42}",
         "x",
-        |_, _| RawApplyOutcome::Bail,
+        |_, _, _| RawApplyOutcome::Bail,
     );
     assert!(matches!(outcome, RawApplyOutcome::Bail));
 }
@@ -1600,7 +1606,7 @@ fn raw_field_format_field_missing_bails_without_invoking_closure() {
     let outcome = apply_field_format_raw(
         b"{\"y\":\"hi\"}",
         "x",
-        |_, _| {
+        |_, _, _| {
             called += 1;
             RawApplyOutcome::Emit
         },
@@ -1615,7 +1621,7 @@ fn raw_field_format_escaped_string_bails_without_invoking_closure() {
     let outcome = apply_field_format_raw(
         br#"{"x":"a\nb"}"#,
         "x",
-        |_, _| {
+        |_, _, _| {
             called += 1;
             RawApplyOutcome::Emit
         },
@@ -1634,7 +1640,7 @@ fn raw_field_format_non_object_input_bails_without_invoking_closure() {
         b"[1,2,3]".as_slice(),
     ] {
         let mut called = 0u32;
-        let outcome = apply_field_format_raw(raw, "x", |_, _| {
+        let outcome = apply_field_format_raw(raw, "x", |_, _, _| {
             called += 1;
             RawApplyOutcome::Emit
         });

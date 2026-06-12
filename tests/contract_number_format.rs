@@ -160,6 +160,42 @@ fn repr_preserving_corpus_pins() {
     assert_eq!(tojson, "null");
 }
 
+/// #1077: `num_repr_text` short-circuits plain short decimal lexemes with a
+/// single scan instead of the three full checks (validity / exactness /
+/// normalization). Pin the boundary shapes on both sides of the gate so the
+/// fast path can never drift from the semantics it replaces — every
+/// expected value below was cross-checked against jq 1.8.1 (the 16-digit
+/// integer is the known no-decnum fallback, #236/#415).
+#[test]
+fn short_canonical_plain_fast_path_boundary_pins() {
+    let cases: &[(&str, &str)] = &[
+        // Inside the fast path: emitted verbatim.
+        ("123", "123"),
+        ("-7", "-7"),
+        ("1.5", "1.5"),
+        ("1.50", "1.50"),
+        ("0.5", "0.5"),
+        ("-0", "-0"),
+        ("999999999999999", "999999999999999"), // 15 digits, max accepted
+        ("0.000001", "0.000001"),               // 5-zero fraction stays plain
+        ("123.4567890123", "123.4567890123"),
+        // Rejected by the fast path (conservative): the full checks decide.
+        ("1.0000005", "1.0000005"), // 6-zero run but te in canonical window
+        ("0.000000", "0.000000"),   // pure-zero 6-digit fraction stays plain
+        ("0.0000001", "1E-7"),      // #611 normalization
+        ("-0.0000001", "-1E-7"),
+        ("1e3", "1E+3"),            // exponent → canonical uppercase-E form
+        ("9999999999999999", "1e+16"), // 16 digits → repr dropped, f64 form
+    ];
+    for &(lexeme, expected) in cases {
+        let n: f64 = lexeme.parse().expect("test lexeme parses");
+        let repr: Rc<str> = Rc::from(lexeme);
+        let mut out = String::new();
+        push_num_tojson_str(&mut out, n, Some(&repr));
+        assert_eq!(out, expected, "for lexeme {lexeme:?}");
+    }
+}
+
 /// The `--sort-keys` writer used to carry its own number formatter that
 /// normalised `-0` to `0`, splitting `-S` output from every other path
 /// (jq 1.8.1 prints `-0`). Unified in #1028 — pin the fix.

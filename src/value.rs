@@ -5995,6 +5995,16 @@ pub fn push_jq_number_str(buf: &mut String, n: f64) {
 ///   but the canonical literal still round-trips through f64 — e.g.
 ///   DBL_MAX `1.7976931348623157e308` and the smallest subnormal `5e-324`.
 fn num_repr_text<'a>(n: f64, repr: Option<&'a Rc<str>>) -> Option<std::borrow::Cow<'a, str>> {
+    // One-pass fast path for the dominant lexeme shape in number-heavy hot
+    // loops (#1077): a plain short decimal is simultaneously a valid JSON
+    // number, exact for its paired f64, and already canonical, so the three
+    // full scans below (validity / exactness / normalization) can be
+    // skipped. Rejection is never wrong — it just falls through.
+    if let Some(r) = repr {
+        if n.is_finite() && repr_is_short_canonical_plain(r) {
+            return Some(std::borrow::Cow::Borrowed(&**r));
+        }
+    }
     if let Some(r) = repr.filter(|r| is_valid_json_number(r) && repr_is_exact_for_f64(r, n)) {
         return Some(match normalize_jq_repr(r) {
             Some(canonical) => std::borrow::Cow::Owned(canonical),
@@ -6005,6 +6015,47 @@ fn num_repr_text<'a>(n: f64, repr: Option<&'a Rc<str>>) -> Option<std::borrow::C
         .and_then(|r| normalize_jq_repr(r))
         .filter(|c| c.as_str().parse::<f64>().ok() == Some(n))
         .map(std::borrow::Cow::Owned)
+}
+
+/// One-pass test for a plain decimal lexeme (optional `-`, integer part
+/// without leading zeros, optional non-empty fraction, no exponent) of at
+/// most 15 total digits whose fraction does not open with six zeros.
+/// Such a lexeme passes all three of `num_repr_text`'s checks verbatim:
+/// it is a valid JSON number by shape, exact for its paired f64
+/// (`repr_is_exact_for_f64` accepts any ≤15-sig-digit finite lexeme, and
+/// total digits bound sig digits), and `normalize_jq_repr` returns `None`
+/// for every plain decimal whose effective exponent stays in the
+/// canonical window — which the ≤15-digit and no-`.000000` constraints
+/// guarantee. Conservative by construction: any rejected lexeme simply
+/// takes the full checks.
+#[inline]
+fn repr_is_short_canonical_plain(repr: &str) -> bool {
+    let b = repr.as_bytes();
+    let mut i = usize::from(b.first() == Some(&b'-'));
+    let int_start = i;
+    while i < b.len() && b[i].is_ascii_digit() { i += 1; }
+    let int_len = i - int_start;
+    if int_len == 0 || (int_len > 1 && b[int_start] == b'0') {
+        return false;
+    }
+    let mut digits = int_len;
+    if i < b.len() {
+        if b[i] != b'.' {
+            return false;
+        }
+        // `0.000000x` normalizes to scientific form (#611) — defer.
+        if b.get(i + 1..i + 7) == Some(&[b'0'; 6][..]) {
+            return false;
+        }
+        i += 1;
+        let frac_start = i;
+        while i < b.len() && b[i].is_ascii_digit() { i += 1; }
+        if i != b.len() || i == frac_start {
+            return false;
+        }
+        digits += i - frac_start;
+    }
+    digits <= 15
 }
 
 /// Core behind the @csv / @tsv number writers: jq preserves the literal
