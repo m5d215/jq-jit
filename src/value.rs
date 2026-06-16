@@ -4968,10 +4968,15 @@ fn parse_json_object_project(b: &[u8], pos: usize, depth: usize, fields: &[&str]
     debug_assert_eq!(b[pos], b'{');
     let mut i = skip_ws(b, pos + 1);
     let n = fields.len();
-    let mut map = new_objmap_with_capacity(n);
+    // Recycle the Rc<ObjMap> allocation from the pool, matching parse_json_object.
+    // Without pooling, narrow records that keep every field pay a fresh Rc/Vec
+    // allocation per record with no skip benefit, regressing streams of small
+    // objects (e.g. `[[.x,.y],[.name]] | flatten` over {x,y,name} records).
+    let mut rc = rc_objmap_pool_get(n);
+    let map = Rc::get_mut(&mut rc).unwrap();
     if i < b.len() && b[i] == b'}' {
         for &f in fields { map.push_unique(KeyStr::from(f), Value::Null); }
-        return Ok((Value::object_from_map(map), i + 1));
+        return Ok((Value::Obj(ObjInner(rc)), i + 1));
     }
     let mut found = 0u64;
     loop {
@@ -5033,7 +5038,7 @@ fn parse_json_object_project(b: &[u8], pos: usize, depth: usize, fields: &[&str]
         if fi < 64 && (found & (1u64 << fi)) != 0 { continue; }
         map.push_unique(KeyStr::from(f), Value::Null);
     }
-    Ok((Value::object_from_map(map), i + 1))
+    Ok((Value::Obj(ObjInner(rc)), i + 1))
 }
 
 /// Stream JSON values from input, only parsing specified fields from top-level objects.
