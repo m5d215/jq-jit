@@ -839,6 +839,119 @@ where F: FnMut(Value) -> Result<()> {
     Ok(())
 }
 
+/// Incrementally parse a top-level JSON value stream from a byte reader,
+/// invoking `cb` for each complete value as soon as it is fully available —
+/// without waiting for EOF. This is the streaming counterpart to `json_stream`
+/// (which needs the whole input up front) and backs `--unbuffered` JSON input
+/// so `tail -f`-style infinite streams emit results in real time (#1133).
+///
+/// `cb` receives the parsed value and its `input_line_number` — the count of
+/// `\n` bytes consumed through the end of the line the value sits on, matching
+/// jq (a value on a terminated line reports that line's number; an unterminated
+/// final value at EOF reports the newlines seen before it).
+///
+/// Model: jq reads line-buffered, so a value is only yielded once its line is
+/// terminated by a newline (or EOF closes the stream). This reader mirrors that
+/// — only the buffer prefix up to the last seen `\n` is parsed mid-stream, which
+/// also makes chunk splits safe (a `12` arriving before `34` is never emitted as
+/// a truncated `12`, since neither has reached a newline yet). A parse failure
+/// inside a complete-line region is treated as an incomplete multi-line value
+/// while more input may arrive, and only surfaced as an error once the reader
+/// reaches EOF — matching jq, which errors on a malformed trailing document.
+pub fn json_stream_reader<R, F>(mut reader: R, mut cb: F) -> Result<()>
+where
+    R: std::io::Read,
+    F: FnMut(Value, u64) -> Result<()>,
+{
+    let count_nl = |s: &[u8]| s.iter().filter(|&&b| b == b'\n').count() as u64;
+    let mut buf: Vec<u8> = Vec::new();
+    let mut consumed = 0usize; // start of the not-yet-emitted region of `buf`
+    let mut nl_total = 0u64; // '\n' bytes consumed up to `consumed`
+    let mut chunk = [0u8; 1 << 16];
+    let mut eof = false;
+    let mut bom_checked = false;
+    loop {
+        // Fill: pull one chunk unless we have already hit EOF and are draining.
+        if !eof {
+            match reader.read(&mut chunk) {
+                Ok(0) => eof = true,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        // Strip a leading BOM once, before the first value is parsed.
+        if !bom_checked && (buf.len() - consumed >= 3 || eof) {
+            if buf.len() - consumed >= 3
+                && buf[consumed] == 0xEF
+                && buf[consumed + 1] == 0xBB
+                && buf[consumed + 2] == 0xBF
+            {
+                consumed += 3;
+            }
+            bom_checked = true;
+        }
+        // Only the region up to the last newline is safe to parse mid-stream:
+        // a value (possibly multi-line) is committed once its line is complete.
+        // At EOF the whole remaining buffer is fair game (final line need not be
+        // newline-terminated).
+        let safe_end = if eof {
+            buf.len()
+        } else {
+            match buf[consumed..].iter().rposition(|&b| b == b'\n') {
+                Some(off) => consumed + off + 1,
+                None => consumed,
+            }
+        };
+        // Drain every complete value within the safe region.
+        loop {
+            let start = skip_ws(&buf, consumed);
+            if start >= safe_end {
+                // Only whitespace remains in the complete-line region; consume
+                // it (counting newlines) and wait for the next line.
+                nl_total += count_nl(&buf[consumed..safe_end]);
+                consumed = safe_end;
+                break;
+            }
+            match parse_json_value(&buf, start, 0) {
+                Ok((val, end)) => {
+                    // A value spilling past the last newline may still be an
+                    // in-flight multi-line document — wait for more input.
+                    if end > safe_end {
+                        break;
+                    }
+                    reject_adjacent_word_token(&buf, end)?;
+                    let nl_before = nl_total + count_nl(&buf[consumed..end]);
+                    // jq's input_line_number for a value on a terminated line is
+                    // that line's number (newlines-before + 1); an unterminated
+                    // final value at EOF keeps newlines-before (#925 semantics).
+                    let terminated = buf[end..].iter().any(|&b| b == b'\n');
+                    let line = if terminated { nl_before + 1 } else { nl_before };
+                    nl_total = nl_before;
+                    consumed = end;
+                    cb(val, line)?;
+                }
+                Err(e) => {
+                    // Incomplete value: wait for more input. At EOF this is a
+                    // genuine malformed trailing document — surface the error.
+                    if eof {
+                        return Err(e);
+                    }
+                    break;
+                }
+            }
+        }
+        // Drop the drained prefix to keep memory bounded on long streams.
+        if consumed > 0 {
+            buf.drain(..consumed);
+            consumed = 0;
+        }
+        if eof {
+            return Ok(());
+        }
+    }
+}
+
 /// Reject two bare-word/number tokens jammed together with no separator at the
 /// top level (`nullnull`, `true123`, `123true`, `false0`). jq tokenises a
 /// contiguous run of literal/number characters as a single token and errors;
