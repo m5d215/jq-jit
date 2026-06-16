@@ -169,6 +169,59 @@ fn record_observers_refuse_projection() {
     }
 }
 
+/// #1135: `json_stream_project` probes the first 64 objects and, if none
+/// skipped a field (a stream of narrow records that keep everything), falls
+/// back to the plain pooled parser for the remainder. The fallback emits the
+/// full record instead of the projected one, so this pins that the substituted
+/// full parse still produces identical filter output past the probe window —
+/// across both all-kept narrow streams (fallback engages) and streams that
+/// skip fields (projection stays on). Records with missing fields are included
+/// so the null-backfill-vs-absent-key equivalence is exercised on both paths.
+#[test]
+fn adaptive_fallback_matches_full_parse_past_probe_window() {
+    // 200 > the 64-record probe window. Build both an all-kept narrow stream
+    // (every key is in {x,y,name} → zero skips → fallback) and a wide stream
+    // (extra keys → skips → projection stays engaged).
+    let mut narrow = String::new();
+    let mut wide = String::new();
+    for i in 0..200 {
+        // Vary presence so some records miss x / y / name (null backfill path).
+        let mut narrow_rec = String::from("{");
+        if i % 5 != 0 { narrow_rec.push_str(&format!(r#""x":{i},"#)); }
+        if i % 3 != 0 { narrow_rec.push_str(&format!(r#""y":{},"#, i * 2)); }
+        narrow_rec.push_str(&format!(r#""name":"n{i}""#));
+        narrow_rec.push('}');
+        narrow.push_str(&narrow_rec);
+        narrow.push('\n');
+
+        wide.push_str(&format!(
+            r#"{{"a":1,"x":{i},"b":2,"y":{},"name":"w{i}","c":3}}"#,
+            i * 2
+        ));
+        wide.push('\n');
+    }
+
+    for filter in ["[[.x,.y],[.name]] | flatten", ".x", "[.x, .y, .name]", ".name // \"d\""] {
+        let mut f = Filter::with_options(filter, &[], false).expect(filter);
+        let fields = f.needed_input_fields().expect("must project");
+        let field_refs: Vec<&str> = fields.iter().map(|s| s.as_str()).collect();
+
+        for stream in [&narrow, &wide] {
+            let mut full = Vec::new();
+            json_stream(stream, |v| { full.push(v); Ok(()) }).expect("full parse");
+            let mut projected = Vec::new();
+            json_stream_project(stream, &field_refs, |v| { projected.push(v); Ok(()) })
+                .expect("projected parse");
+
+            assert_eq!(
+                run_filter(&mut f, &full),
+                run_filter(&mut f, &projected),
+                "{filter:?} diverges between full and projected parse past the probe window"
+            );
+        }
+    }
+}
+
 /// The projecting parser tracks found keys in a u64 bitset; the extraction
 /// must refuse field sets that would overflow it.
 #[test]

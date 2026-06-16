@@ -4974,7 +4974,12 @@ pub fn skip_json_value_classify(b: &[u8], pos: usize) -> Result<(usize, bool)> {
 
 /// Parse a JSON object, only parsing values for keys in `fields`. Other values are skipped.
 /// Uses the same key parsing as parse_json_object but skips value parsing for non-matching keys.
-fn parse_json_object_project(b: &[u8], pos: usize, depth: usize, fields: &[&str]) -> Result<(Value, usize)> {
+///
+/// The third tuple element is the number of object keys that were *skipped*
+/// (not in `fields`); [`json_stream_project`] uses it as an adaptive signal —
+/// a stream of records that skip nothing pays the per-key field match for no
+/// gain, so it falls back to the plain pooled parser (#1135).
+fn parse_json_object_project(b: &[u8], pos: usize, depth: usize, fields: &[&str]) -> Result<(Value, usize, u32)> {
     debug_assert_eq!(b[pos], b'{');
     let mut i = skip_ws(b, pos + 1);
     let n = fields.len();
@@ -4986,9 +4991,10 @@ fn parse_json_object_project(b: &[u8], pos: usize, depth: usize, fields: &[&str]
     let map = Rc::get_mut(&mut rc).unwrap();
     if i < b.len() && b[i] == b'}' {
         for &f in fields { map.push_unique(KeyStr::from(f), Value::Null); }
-        return Ok((Value::Obj(ObjInner(rc)), i + 1));
+        return Ok((Value::Obj(ObjInner(rc)), i + 1, 0));
     }
     let mut found = 0u64;
+    let mut skipped = 0u32;
     loop {
         if i >= b.len() || b[i] != b'"' { bail!("Expected string key at position {}", i); }
         // Scan key bytes directly without creating KeyStr for non-matching keys
@@ -5037,6 +5043,7 @@ fn parse_json_object_project(b: &[u8], pos: usize, depth: usize, fields: &[&str]
         }
         if !matched {
             i = skip_json_value(b, i)?;
+            skipped += 1;
         }
         i = skip_ws(b, i);
         if i >= b.len() { bail!("Unterminated object"); }
@@ -5048,7 +5055,7 @@ fn parse_json_object_project(b: &[u8], pos: usize, depth: usize, fields: &[&str]
         if fi < 64 && (found & (1u64 << fi)) != 0 { continue; }
         map.push_unique(KeyStr::from(f), Value::Null);
     }
-    Ok((Value::Obj(ObjInner(rc)), i + 1))
+    Ok((Value::Obj(ObjInner(rc)), i + 1, skipped))
 }
 
 /// Stream JSON values from input, only parsing specified fields from top-level objects.
@@ -5059,9 +5066,40 @@ where F: FnMut(Value) -> Result<()> {
     let mut pos = 0;
     if bytes.len() >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF { pos = 3; }
     pos = skip_ws(bytes, pos);
+    // Adaptive projection: projecting only pays off when records carry extra
+    // fields to skip. Probe the first PROBE objects; if not one of them skipped
+    // a field (a stream of narrow records that keep everything), drop to the
+    // plain pooled parser for the remainder — projecting an all-kept record
+    // adds a per-key field match for zero skip benefit (#1135). A full parse is
+    // a safe substitute because `needed_input_fields` only projects filters
+    // that read exactly this field set, so the extra materialized fields are
+    // never observed (the same invariant that makes projection itself sound;
+    // pinned by tests/contract_projection.rs). One probe record with a skip is
+    // enough to keep projecting, preserving the wide-record wins.
+    const PROBE: u32 = 64;
+    let mut probed = 0u32;
+    let mut keep_projecting = true;
     while pos < bytes.len() {
         let (val, end) = if bytes[pos] == b'{' {
-            parse_json_object_project(bytes, pos, 0, fields)?
+            if probed < PROBE {
+                let (v, e, skipped) = parse_json_object_project(bytes, pos, 0, fields)?;
+                if skipped > 0 {
+                    // Projection earned its keep; stop probing and lock it in.
+                    probed = PROBE;
+                } else {
+                    probed += 1;
+                    if probed >= PROBE {
+                        // Probe window closed with zero skips across every record.
+                        keep_projecting = false;
+                    }
+                }
+                (v, e)
+            } else if keep_projecting {
+                let (v, e, _) = parse_json_object_project(bytes, pos, 0, fields)?;
+                (v, e)
+            } else {
+                parse_json_value(bytes, pos, 0)?
+            }
         } else {
             parse_json_value(bytes, pos, 0)?
         };
