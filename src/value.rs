@@ -1874,14 +1874,18 @@ pub fn json_object_del_field(b: &[u8], pos: usize, field: &str, buf: &mut Vec<u8
             if i >= b.len() || b[i] != b':' { break; }
             i += 1;
             let val_start = i;
-            let val_end = match skip_json_value(b, i) { Ok(e) => e, Err(_) => break };
+            let (val_end, vclean) = match skip_json_value_classify(b, i) { Ok(r) => r, Err(_) => break };
             if !key_matches {
                 if !first_out { buf.push(b','); }
                 first_out = false;
                 buf.extend_from_slice(&b[key_start..val_start]); // "key":
-                // Canonicalise a non-canonical number repr in the retained
-                // value rather than echo the source lexeme (#729).
-                if !append_canonical_value(buf, &b[val_start..val_end]) {
+                // The boundary scan already proved a clean scalar verbatim-safe
+                // (no escape/DEL/non-canonical number); copy it directly and only
+                // re-render through the canonicaliser otherwise (#729 number
+                // reprs, #780/#1027 escapes) — the #758 del passthrough tax.
+                if vclean {
+                    buf.extend_from_slice(&b[val_start..val_end]);
+                } else if !append_canonical_value(buf, &b[val_start..val_end]) {
                     buf.truncate(buf_start);
                     return false;
                 }
@@ -1915,14 +1919,17 @@ pub fn json_object_del_field(b: &[u8], pos: usize, field: &str, buf: &mut Vec<u8
         if i >= b.len() || b[i] != b':' { break; }
         i += 1;
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
-        let val_end = match skip_json_value(b, i) { Ok(e) => e, Err(_) => break };
+        let (val_end, vclean) = match skip_json_value_classify(b, i) { Ok(r) => r, Err(_) => break };
         if !key_matches {
             if !first_out { buf.push(b','); }
             first_out = false;
             buf.extend_from_slice(&b[key_start..key_end]);
             buf.push(b':');
-            // Canonicalise a non-canonical number repr (#729).
-            if !append_canonical_value(buf, &b[i..val_end]) {
+            // Verbatim-copy a clean scalar; canonicalise otherwise (#729/#780,
+            // the #758 del passthrough tax).
+            if vclean {
+                buf.extend_from_slice(&b[i..val_end]);
+            } else if !append_canonical_value(buf, &b[i..val_end]) {
                 buf.truncate(buf_start);
                 return false;
             }
@@ -1967,14 +1974,17 @@ pub fn json_object_del_fields(b: &[u8], pos: usize, fields: &[&str], buf: &mut V
         if i >= b.len() || b[i] != b':' { break; }
         i += 1;
         while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
-        let val_end = match skip_json_value(b, i) { Ok(e) => e, Err(_) => break };
+        let (val_end, vclean) = match skip_json_value_classify(b, i) { Ok(r) => r, Err(_) => break };
         if !key_matches {
             if !first_out { buf.push(b','); }
             first_out = false;
             buf.extend_from_slice(&b[key_start..key_end]);
             buf.push(b':');
-            // Canonicalise a non-canonical number repr (#729).
-            if !append_canonical_value(buf, &b[i..val_end]) {
+            // Verbatim-copy a clean scalar; canonicalise otherwise (#729/#780,
+            // the #758 del passthrough tax).
+            if vclean {
+                buf.extend_from_slice(&b[i..val_end]);
+            } else if !append_canonical_value(buf, &b[i..val_end]) {
                 buf.truncate(buf_start);
                 return false;
             }

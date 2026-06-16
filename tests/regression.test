@@ -14228,3 +14228,18 @@ def r: if . <= 0 then 0 else . + (. - 1 | r) end; r
 def dbl: . * 2; def f(g): [.[] | g]; f(dbl) | f(dbl)
 [1,2,3]
 [4,8,12]
+
+# #758: del passthrough re-renders non-canonical retained numbers (#729)
+del(.b)
+{"a":1e10,"b":2}
+{"a":1E+10}
+
+# #758: del passthrough rewrites escaped solidus in retained string (#780)
+del(.b)
+{"a":"p\/q","b":2}
+{"a":"p/q"}
+
+# #758: del passthrough preserves clean scalar literals verbatim
+del(.name)
+{"x":1,"y":1e3,"name":"n"}
+{"x":1,"y":1E+3}
