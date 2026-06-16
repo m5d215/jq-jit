@@ -629,7 +629,7 @@ fn run_parallel_json_stream(
     }
 }
 
-use jq_jit::value::{Value, json_to_value, json_stream, json_stream_offsets, json_stream_raw, json_stream_project, json_value_has_duplicate_keys, json_stream_has_duplicate_keys, json_object_get_num, json_object_get_two_nums, json_object_get_field_raw, json_object_get_fields_raw_buf, parse_json_num, json_value_length, json_object_keys_unsorted_to_buf,json_object_keys_join_to_buf, json_object_has_key, json_object_has_all_keys, json_object_has_any_key, json_object_del_field, json_object_del_fields, json_object_merge_literal, json_object_sort_keys, json_each_value_raw, json_each_value_cb, json_to_entries_raw, json_object_set_field_raw, json_object_update_field_num, json_object_update_field_num_chain,json_object_select_then_update_num, json_object_select_then_update_str_concat, json_object_select_compound_then_update_num, json_object_select_str_then_update_num, is_json_compact, push_json_compact_raw, push_tojson_raw, push_json_pretty_raw, push_json_pretty_raw_at, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, push_compact_line_color, push_pretty_line, push_pretty_line_color, push_jq_number_bytes, write_value_compact_ext, write_value_compact_line, write_value_pretty_line_color, value_to_json_pretty_color, walk_json_transform_nums, pool_value, skip_json_value, raw_contains_non_canonical_number, append_canonical_value, raw_contains_noncanon_escape, push_raw_canon_escapes};
+use jq_jit::value::{Value, json_to_value, json_stream, json_stream_reader, json_stream_offsets, json_stream_raw, json_stream_project, json_value_has_duplicate_keys, json_stream_has_duplicate_keys, json_object_get_num, json_object_get_two_nums, json_object_get_field_raw, json_object_get_fields_raw_buf, parse_json_num, json_value_length, json_object_keys_unsorted_to_buf,json_object_keys_join_to_buf, json_object_has_key, json_object_has_all_keys, json_object_has_any_key, json_object_del_field, json_object_del_fields, json_object_merge_literal, json_object_sort_keys, json_each_value_raw, json_each_value_cb, json_to_entries_raw, json_object_set_field_raw, json_object_update_field_num, json_object_update_field_num_chain,json_object_select_then_update_num, json_object_select_then_update_str_concat, json_object_select_compound_then_update_num, json_object_select_str_then_update_num, is_json_compact, push_json_compact_raw, push_tojson_raw, push_json_pretty_raw, push_json_pretty_raw_at, value_to_json_precise, value_to_json_pretty_ext, push_compact_line, push_compact_line_color, push_pretty_line, push_pretty_line_color, push_jq_number_bytes, write_value_compact_ext, write_value_compact_line, write_value_pretty_line_color, value_to_json_pretty_color, walk_json_transform_nums, pool_value, skip_json_value, raw_contains_non_canonical_number, append_canonical_value, raw_contains_noncanon_escape, push_raw_canon_escapes};
 use jq_jit::interpreter::Filter;
 use jq_jit::fast_path::{
     apply_arith_chain_cmp_raw, apply_field_access_raw, apply_field_alternative_raw,
@@ -3258,8 +3258,23 @@ fn real_main() {
 
     let mut had_error = false;
 
+    // --unbuffered JSON stdin: stream values incrementally instead of pre-reading
+    // the whole stream, so continuous/infinite inputs (e.g. `tail -f`, `pw-dump
+    // -m`) emit per value in real time (#1133). Scoped to plain per-document
+    // JSON stdin — slurp, `input`/`inputs`, --seq framing and raw input keep
+    // their existing whole-stream handling (they cannot stream by definition or
+    // need the full buffer for framing/line accounting). Without --unbuffered,
+    // the pre-read below is retained as a deliberate throughput tradeoff.
+    let stream_unbuffered = unbuffered
+        && !null_input
+        && files.is_empty()
+        && !raw_input
+        && !slurp
+        && !seq
+        && !filter.uses_inputs();
+
     // Pre-read stdin so we can estimate input size for JIT decision.
-    let stdin_data: Option<String> = if !null_input && files.is_empty() && !raw_input {
+    let stdin_data: Option<String> = if !null_input && files.is_empty() && !raw_input && !stream_unbuffered {
         let mut s = String::new();
         io::stdin().lock().read_to_string(&mut s).unwrap_or(0);
         if seq {
@@ -4363,6 +4378,29 @@ fn real_main() {
             process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
         }
         jq_jit::eval::clear_inputs_queue();
+    } else if stream_unbuffered {
+        // #1133: --unbuffered JSON stdin streams value-by-value so a continuous
+        // input flushes results as they arrive rather than blocking on EOF.
+        // `process_input` already flushes after each value under --unbuffered,
+        // so feeding values through it suffices.
+        jq_jit::eval::set_input_filename(Some(std::rc::Rc::from("<stdin>")));
+        let stdin = io::stdin();
+        let parse_result = json_stream_reader(stdin.lock(), |v, nl| {
+            jq_jit::eval::set_input_line_number(nl);
+            process_input(&v, None, &mut out, &mut compact_buf, &mut any_output_false, &mut had_error);
+            Ok(())
+        });
+        if let Err(e) = parse_result {
+            // Match the batch stream path (#856): leading documents already
+            // flushed per value; report the parse error and exit 5.
+            if !compact_buf.is_empty() {
+                let _ = out.write_all(&compact_buf);
+                compact_buf.clear();
+            }
+            let _ = out.flush();
+            eprintln!("jq: error (at <stdin>:0): {}", e);
+            process::exit(5);
+        }
     } else if files.is_empty() {
         // Read from stdin
         // `input_filename` reports "<stdin>" for the stdin stream (#926).
