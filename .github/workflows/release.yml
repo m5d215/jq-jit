@@ -24,7 +24,7 @@ jobs:
             target: windows-x86_64
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install jq 1.8.1 (for differential tests)
         shell: bash
@@ -94,7 +94,7 @@ jobs:
         run: gh release create "${{ github.ref_name }}" --generate-notes jq-jit-*.tar.gz jq-jit-*.zip
 
       - name: Checkout homebrew-tap
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: m5d215/homebrew-tap
           token: ${{ secrets.TAP_PUSH_TOKEN }}
