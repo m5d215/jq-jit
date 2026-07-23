@@ -821,6 +821,63 @@ pub fn json_to_value(json: &str) -> Result<Value> {
     Ok(val)
 }
 
+/// Blank `//` line comments and `/* */` block comments outside strings with
+/// spaces, in place (`--jsonc`, #1141). Blanking instead of removing keeps the
+/// buffer length and every `\n` position intact, so byte-offset accounting
+/// (`json_stream_raw` ranges, projection fast paths) and `input_line_number`
+/// need no comment-awareness downstream — the buffer is standard JSON after
+/// this pass. String contents are left untouched (`"http://x"` keeps its
+/// slashes); an unescaped `"` toggles in-string state, `\` escapes the next
+/// byte. An unterminated block comment blanks to EOF. Only ASCII spaces are
+/// written, so UTF-8 validity is preserved even inside multi-byte comment text.
+pub fn strip_json_comments(s: &mut String) {
+    // SAFETY: only ASCII 0x20 is ever written, never into a multi-byte
+    // sequence boundary shift — length and UTF-8 validity are preserved.
+    let b = unsafe { s.as_mut_vec() };
+    let n = b.len();
+    let mut i = 0;
+    let mut in_string = false;
+    while i < n {
+        let c = b[i];
+        if in_string {
+            if c == b'\\' {
+                i += 2;
+                continue;
+            }
+            if c == b'"' {
+                in_string = false;
+            }
+            i += 1;
+        } else if c == b'"' {
+            in_string = true;
+            i += 1;
+        } else if c == b'/' && i + 1 < n && b[i + 1] == b'/' {
+            while i < n && b[i] != b'\n' {
+                b[i] = b' ';
+                i += 1;
+            }
+        } else if c == b'/' && i + 1 < n && b[i + 1] == b'*' {
+            b[i] = b' ';
+            b[i + 1] = b' ';
+            i += 2;
+            while i < n {
+                if b[i] == b'*' && i + 1 < n && b[i + 1] == b'/' {
+                    b[i] = b' ';
+                    b[i + 1] = b' ';
+                    i += 2;
+                    break;
+                }
+                if b[i] != b'\n' {
+                    b[i] = b' ';
+                }
+                i += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+}
+
 /// Parse multiple JSON values from a single string, calling a callback for each.
 /// Avoids the double-scan of split_json_values + json_to_value.
 pub fn json_stream<F>(input: &str, mut cb: F) -> Result<()>

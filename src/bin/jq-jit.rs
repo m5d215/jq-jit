@@ -2835,6 +2835,7 @@ fn real_main() {
     let mut exit_status = false;
     let mut color_output = false;
     let mut unbuffered = false;
+    let mut jsonc = false;
     let mut seq = false;
     // 0 = parallel disabled. `--parallel` sets it to the detected core count,
     // `--parallel=N` to N. Per-record worker-pool execution for stateless
@@ -2914,6 +2915,7 @@ fn real_main() {
             "-C" | "--color-output" => color_output = true,
             "-M" | "--monochrome-output" => color_output = false,
             "--unbuffered" => unbuffered = true,
+            "--jsonc" => jsonc = true,
             "--seq" => seq = true,
             "--parallel" => {
                 parallel_jobs = std::thread::available_parallelism()
@@ -3273,6 +3275,15 @@ fn real_main() {
         && !seq
         && !filter.uses_inputs();
 
+    // --jsonc strips comments with one whole-buffer pass at the input
+    // boundary; the incremental --unbuffered stdin reader never holds the
+    // whole buffer, so a comment straddling a read boundary cannot be handled
+    // there. Reject the combination explicitly rather than degrade it (#1141).
+    if jsonc && stream_unbuffered {
+        eprintln!("jq: error: --jsonc cannot be combined with --unbuffered streaming JSON stdin");
+        process::exit(2);
+    }
+
     // Pre-read stdin so we can estimate input size for JIT decision.
     let stdin_data: Option<String> = if !null_input && files.is_empty() && !raw_input && !stream_unbuffered {
         let mut s = String::new();
@@ -3297,6 +3308,9 @@ fn real_main() {
                 );
                 s.clear();
             }
+        }
+        if jsonc {
+            jq_jit::value::strip_json_comments(&mut s);
         }
         Some(s)
     } else {
@@ -4321,6 +4335,9 @@ fn real_main() {
                 if raw_input {
                     inputs_values.extend(tag_filename(raw_inputs_with_lines(&input_str), &stdin_name));
                 } else {
+                    if jsonc {
+                        jq_jit::value::strip_json_comments(&mut input_str);
+                    }
                     match json_inputs_with_lines(&input_str) {
                         Ok(vs) => inputs_values.extend(tag_filename(vs, &stdin_name)),
                         Err(e) => { eprintln!("jq: error (at <stdin>:0): {}", e); process::exit(2); }
@@ -4331,13 +4348,16 @@ fn real_main() {
                 // `input_filename` reflects the file the value came from (#926).
                 for file in &files {
                     let fname: std::rc::Rc<str> = std::rc::Rc::from(file.as_str());
-                    let content = match std::fs::read_to_string(file) {
+                    let mut content = match std::fs::read_to_string(file) {
                         Ok(c) => c,
                         Err(e) => { eprintln!("jq: error: Could not open file {}: {}", file, e); process::exit(2); }
                     };
                     if raw_input {
                         inputs_values.extend(tag_filename(raw_inputs_with_lines(&content), &fname));
                     } else {
+                        if jsonc {
+                            jq_jit::value::strip_json_comments(&mut content);
+                        }
                         match json_inputs_with_lines(&content) {
                             Ok(vs) => inputs_values.extend(tag_filename(vs, &fname)),
                             Err(e) => { eprintln!("jq: error (at {}:0): {}", file, e); process::exit(2); }
@@ -13574,6 +13594,9 @@ fn real_main() {
             if file == "-" {
                 let mut s = String::new();
                 io::stdin().lock().read_to_string(&mut s).unwrap_or(0);
+                if jsonc && !raw_input {
+                    jq_jit::value::strip_json_comments(&mut s);
+                }
                 if slurp {
                     if raw_input {
                         for line in split_raw_lines(&s) {
@@ -13631,6 +13654,18 @@ fn real_main() {
                 content = "";
             }
             let _ = &mmap; // keep mmap alive
+            // --jsonc: the mmap is read-only, so comment blanking takes an
+            // owned copy — a cost paid only when the flag is on; the flag-off
+            // path stays zero-copy (#1141).
+            let jsonc_owned;
+            let content = if jsonc && !raw_input {
+                let mut s = content.to_string();
+                jq_jit::value::strip_json_comments(&mut s);
+                jsonc_owned = s;
+                jsonc_owned.as_str()
+            } else {
+                content
+            };
             let parse_result = if parallel_active && !slurp && !raw_input {
                 run_parallel_json_stream(
                     content, parallel_jobs, &filter_str, &lib_dirs,
@@ -22560,6 +22595,7 @@ fn print_usage() {
     eprintln!("  -M, --monochrome-output  Disable color output (default)");
     eprintln!("  --args                   Remaining args are string $ARGS.positional");
     eprintln!("  --jsonargs               Remaining args are JSON $ARGS.positional");
+    eprintln!("  --jsonc                  Allow // and /* */ comments in JSON input (jqx)");
     eprintln!("  --parallel[=N]           Run stateless filters per-record across N workers (jqx; default: cores)");
     eprintln!("  --memo-max-entries N     Per-slot cap for memoize/1 cache (jqx; default 1000000)");
     eprintln!("  --debug-memo             Print per-slot memoize cache stats to stderr on exit (jqx)");
