@@ -111,6 +111,7 @@ jq-jit [OPTIONS] <FILTER> [FILE...]
 | `--indent N` | Use N spaces for indentation (range -1..=7; -1 means tab; default: 2) |
 | `--unbuffered` | Flush output after each value |
 | `--seq` | Frame each output with `RS` (0x1E) per RFC 7464 |
+| `--jsonc` | _(jqx)_ Allow `//` and `/* */` comments in JSON input; see [JSONC input](#jsonc-input) |
 | `--parallel[=N]` | _(jqx)_ Run a stateless filter per-record across N worker threads (default: core count); see [Parallel execution](#parallel-execution) |
 | `-f`, `--from-file FILE` | Read filter from file |
 | `-L`, `--library-path DIR` | Add DIR to the module search path (repeatable) |
@@ -300,6 +301,31 @@ jq-jit --debug-memo -n 'def fib: memoize(if . < 2 then . else ((. - 1) | fib) + 
 The 1-arg form keys only by the current input. If your body closes over a
 `$var` that varies between calls, results will be stale — pull the var into
 the key explicitly with the 2-arg form: `memoize(. + $x; [., $x])`.
+
+### JSONC input
+
+`--jsonc` lets the JSON input parser accept `//` line comments and `/* */`
+block comments, for running filters directly over JSONC-style config files
+(`tsconfig.json`, editor settings, `.jsonc`) without a comment-stripping
+preprocessing step:
+
+```bash
+jq-jit --jsonc '.compilerOptions.strict' tsconfig.json
+```
+
+Scope is deliberately **comments only** — trailing commas, single-quoted
+strings, unquoted keys, and the rest of JSON5 remain parse errors. Comments
+are stripped once at the input boundary (string-aware, so `"http://x"` is
+untouched); with the flag off, the input path is byte-identical to before.
+
+Notes:
+
+- Applies to top-level JSON input (stdin and input files, including the
+  `input` / `inputs` builtins). `fromjson`, `--argjson`, and `--slurpfile`
+  stay strict JSON.
+- Not combinable with `--unbuffered` streaming JSON stdin (the incremental
+  reader never holds the whole buffer); `--jsonc --unbuffered` with file
+  inputs works normally.
 
 ### Parallel execution
 
