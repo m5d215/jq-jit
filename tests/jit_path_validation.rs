@@ -58,12 +58,12 @@ fn simple_path_validates_navigation() {
     assert_jit(
         "try path(.[0]) catch .",
         "5",
-        "\"Cannot index number with number\"",
+        "\"Cannot index number with number (0)\"",
     );
     assert_jit(
         "try path(.x) catch .",
         "5",
-        "\"Cannot index number with string \\\"x\\\"\"",
+        "\"Cannot index number with string (\\\"x\\\")\"",
     );
     // Valid navigations still yield the path.
     assert_jit("path(.a)", "{\"a\":1}", "[\"a\"]");
@@ -76,12 +76,12 @@ fn invalid_path_keys_raise() {
     assert_jit(
         "try (path(.[true])) catch .",
         "null",
-        "\"Cannot index null with boolean\"",
+        "\"Cannot index null with boolean (true)\"",
     );
     assert_jit(
         "try (path(.[null])) catch .",
         "null",
-        "\"Cannot index null with null\"",
+        "\"Cannot index null with null (null)\"",
     );
 }
 
@@ -105,12 +105,12 @@ fn reduce_setpath_surfaces_navigation_errors() {
     assert_jit(
         "try (reduce range(1) as $_ (.; setpath([\"a\"]; 99))) catch .",
         "5",
-        "\"Cannot index number with string \\\"a\\\"\"",
+        "\"Cannot index number with string (\\\"a\\\")\"",
     );
     assert_jit(
         "try (reduce range(1) as $_ (.; setpath([null]; 99))) catch .",
         "5",
-        "\"Cannot index number with null\"",
+        "\"Cannot index number with null (null)\"",
     );
     // The happy path keeps working in place.
     assert_jit(
@@ -125,7 +125,7 @@ fn transpose_raises_on_non_array_elements() {
     assert_jit(
         "try transpose catch .",
         "[1,2]",
-        "\"Cannot index number with number\"",
+        "\"Cannot index number with number (0)\"",
     );
     assert_jit("transpose", "[[1,2],[3,4]]", "[[1,3],[2,4]]");
 }

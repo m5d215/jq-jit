@@ -7775,7 +7775,7 @@ extern "C" fn jit_rt_field_is_truthy(base: *const Value, key_ptr: *const u8, key
             // JumpIfError and bails before branching on the (meaningless) 0.
             _ => {
                 let key = std::str::from_utf8_unchecked(std::slice::from_raw_parts(key_ptr, key_len));
-                set_jit_error(format!("Cannot index {} with string \"{}\"", (*base).type_name(), key));
+                set_jit_error(format!("Cannot index {} with {}", (*base).type_name(), crate::runtime::errdesc_str(&key)));
                 0
             }
         }
@@ -7801,7 +7801,7 @@ extern "C" fn jit_rt_field_cmp_num(base: *const Value, key_ptr: *const u8, key_l
             // flag via JumpIfError and bails before branching on the
             // (meaningless) 0 this returns.
             _ => {
-                set_jit_error(format!("Cannot index {} with string \"{}\"", (*base).type_name(), key));
+                set_jit_error(format!("Cannot index {} with {}", (*base).type_name(), crate::runtime::errdesc_str(&key)));
                 return 0;
             }
         };
@@ -7872,7 +7872,7 @@ extern "C" fn jit_rt_field_binop_field(
             }
             _ => {
                 let ka_str = std::str::from_utf8_unchecked(std::slice::from_raw_parts(ka_ptr, ka_len));
-                set_jit_error(format!("Cannot index {} with string \"{}\"", (*base).type_name(), ka_str));
+                set_jit_error(format!("Cannot index {} with {}", (*base).type_name(), crate::runtime::errdesc_str(&ka_str)));
                 std::ptr::write(dst, Value::Null);
                 return GEN_ERROR;
             }
@@ -7938,7 +7938,7 @@ extern "C" fn jit_rt_field_binop_const(
             }
             _ => {
                 let key = std::str::from_utf8_unchecked(std::slice::from_raw_parts(key_ptr, key_len));
-                set_jit_error(format!("Cannot index {} with string \"{}\"", (*base).type_name(), key));
+                set_jit_error(format!("Cannot index {} with {}", (*base).type_name(), crate::runtime::errdesc_str(&key)));
                 std::ptr::write(dst, Value::Null);
                 return GEN_ERROR;
             }
@@ -8133,8 +8133,13 @@ extern "C" fn jit_rt_index(dst: *mut Value, base: *const Value, key: *const Valu
             std::ptr::write(dst, o.get(k.as_str()).cloned().unwrap_or(Value::Null));
             return 0;
         }
-        // Fast path: null[anything] = null
-        if matches!(&*base, Value::Null) {
+        // Fast path: null[str|num|obj] = null. Bool/null/array keys must fall
+        // through to eval_index, which raises jq's "Cannot index null with
+        // <kind>" type error (#193) — the old null[anything] shortcut
+        // swallowed it (#1144).
+        if matches!(&*base, Value::Null)
+            && matches!(&*key, Value::Str(_) | Value::Num(_, _) | Value::Obj(_))
+        {
             std::ptr::write(dst, Value::Null);
             return 0;
         }
@@ -9018,10 +9023,12 @@ extern "C" fn jit_rt_path_extract(element: *mut Value, container: *mut Value, ke
                 }
                 0
             }
-            // jq permits indexing null with any key, yielding null — keep the
-            // in-place update fast path lenient here so a null-valued cell
-            // navigates the same as the generic eval / setpath path.
-            (Value::Null, _) => {
+            // jq permits indexing null with string/number/object keys,
+            // yielding null — keep the in-place update fast path lenient for
+            // those so a null-valued cell navigates the same as the generic
+            // eval / setpath path. Bool/null/array keys fall through to the
+            // type-error arm like jq (#193, #1144).
+            (Value::Null, Value::Str(_) | Value::Num(_, _) | Value::Obj(_)) => {
                 std::ptr::write(element, Value::Null);
                 0
             }
@@ -9706,9 +9713,10 @@ extern "C" fn jit_rt_call_builtin(dst: *mut Value, builtin: *const JitBuiltin,
                         return 0;
                     }
                     Some(RtBuiltin::Rtrimstr) => {
-                        std::ptr::write(dst, if t.is_empty() {
-                            Value::from_str("")
-                        } else if let Some(rest) = s.strip_suffix(t.as_str()) {
+                        // rtrimstr("") is the identity since jq 1.8.2
+                        // (jqlang/jq#3415): strip_suffix("") yields the
+                        // whole string.
+                        std::ptr::write(dst, if let Some(rest) = s.strip_suffix(t.as_str()) {
                             Value::from_str(rest)
                         } else {
                             args[0].clone()

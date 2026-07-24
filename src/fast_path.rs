@@ -1695,10 +1695,10 @@ where
                 }
             }
             StringChainOp::Rtrimstr(s) => {
+                // rtrimstr("") is the identity since jq 1.8.2
+                // (jqlang/jq#3415) — ends_with("") makes this a no-op.
                 let sb = s.as_bytes();
-                if sb.is_empty() {
-                    tmp_str.clear();
-                } else if tmp_str.ends_with(sb) {
+                if tmp_str.ends_with(sb) {
                     let new_len = tmp_str.len() - sb.len();
                     tmp_str.truncate(new_len);
                 }

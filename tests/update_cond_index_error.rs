@@ -2,7 +2,7 @@
 //! else SCALAR end` (with a *generator* then-branch) must evaluate `COND`
 //! with the same error semantics as every other path. A condition that
 //! indexes a non-object/non-null value — e.g. `.a` on a boolean — raises
-//! `Cannot index <type> with string "<field>"`, and `?`-less callers surface
+//! `Cannot index <type> with string ("<field>")`, and `?`-less callers surface
 //! it.
 //!
 //! The JIT compiled the if-condition through the fused `FieldCmpNum` /
@@ -62,7 +62,7 @@ fn plus_assign_generator_then_propagates_cond_index_error() {
         assert_ne!(r.code, 0, "expected error for `{filter}`, got stdout {:?}", r.stdout);
         assert!(r.stdout.is_empty(), "expected no output for `{filter}`, got {:?}", r.stdout);
         assert!(
-            r.stderr.contains(r#"Cannot index boolean with string "a""#),
+            r.stderr.contains(r#"Cannot index boolean with string ("a")"#),
             "wrong error for `{filter}`: {:?}",
             r.stderr
         );
@@ -75,14 +75,14 @@ fn error_message_includes_field_name() {
     // ("... with string" with no field name).
     let r = run(r#".x += map(if (.a > 0) then 1 else 0 end)"#, r#"{"a":false}"#);
     assert!(
-        r.stderr.contains(r#"Cannot index boolean with string "a""#),
+        r.stderr.contains(r#"Cannot index boolean with string ("a")"#),
         "truncated/wrong error: {:?}",
         r.stderr
     );
     // Number base reports its own type.
     let r = run(r#".x += map(if (.a > 0) then values else 0 end)"#, r#"{"a":7}"#);
     assert!(
-        r.stderr.contains(r#"Cannot index number with string "a""#),
+        r.stderr.contains(r#"Cannot index number with string ("a")"#),
         "wrong type in error: {:?}",
         r.stderr
     );
