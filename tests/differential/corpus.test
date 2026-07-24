@@ -4279,3 +4279,55 @@ select(.b * 2 > 1) | .a
 # select|length literal repr preservation
 select(.b > 0) | .a | length
 {"a":-1.50,"b":2}
+
+# jq 1.8.2 alignment (#1144): index errors dump the key after the kind
+[try (5 | .foo) catch ., try ({} | .[0]) catch ., try ("s" | .[1]) catch ., try (true | .["k"]) catch ., try (null | .[true]) catch ., try ({"a":1} | .[[1]]) catch .]
+null
+
+# jq 1.8.2 alignment (#1144): long-key error dump truncates with a closing delimiter
+try .["verylongkeyaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"] catch .
+[1]
+
+# jq 1.8.2 alignment (#1144): truncation backs up to a UTF-8 char boundary
+[try ("☆☆☆☆☆☆☆☆☆☆☆☆" + 1) catch ., try ("éééééééééééééééé" + 1) catch .]
+null
+
+# jq 1.8.2 alignment (#1144): long literal digits survive in error dumps
+try (12345678901234567890123456789012345678 | .[]) catch .
+null
+
+# jq 1.8.2 alignment (#1144): slice type errors dump the synthesized {start, end} key
+[try (true | .[1:2]) catch ., try ({} | .[:2]) catch ., try (1 | path(.[1:2])) catch ., try (true | .[1:2] = 3) catch .]
+null
+
+# jq 1.8.2 alignment (#1144): setpath/getpath/del/assignment errors dump the key
+[try setpath([0]; 1) catch ., try getpath([0]) catch ., try del(.[0]) catch ., try (.[0] = 5) catch ., try (.[0] |= 1) catch .]
+{"a":1}
+
+# jq 1.8.2 alignment (#1144): delete errors keep kind-only wording
+[try delpaths([["a"]]) catch ., try ({"a":1} | delpaths([[true]])) catch .]
+[1]
+
+# jq 1.8.2 alignment (#1144): rtrimstr("")/trimstr("") are identity, paths use absolute ends
+[rtrimstr(""), ltrimstr(""), trimstr(""), ([path(rtrimstr("ca")), path(trimstr("a")), path(rtrimstr(""))] | tojson)]
+"abca"
+
+# jq 1.8.2 alignment (#1144): @urid passes raw multi-byte characters through
+[("é", "caf%C3%A9", "a//b é%20x", "é%C3%A9") | @urid]
+null
+
+# jq 1.8.2 alignment (#1144): del(.[nan]) is a no-op
+[del(.[nan]), del(.[0,nan]), (try del(.[nan:1]) catch .)]
+[1,2]
+
+# jq 1.8.2 alignment (#1144): reverse/index/rindex/transpose/from_entries dump internal keys
+[try ("ab" | reverse) catch ., try (5 | reverse) catch ., try (5 | index("a")) catch ., try ({"a":1} | index("a")) catch ., try ({"a":1} | rindex("a")) catch ., try ([[1],5] | transpose) catch ., try ([[1,"x"]] | from_entries) catch .]
+null
+
+# jq 1.8.2 alignment (#1144): toboolean rejects and dumps embedded NUL like jq
+try ("true\u0000x" | toboolean) catch .
+null
+
+# jq 1.8.2 alignment (#1144): truncate_stream on a scalar dumps the .[0] key
+try truncate_stream(5) catch .
+null

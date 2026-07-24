@@ -7,7 +7,9 @@
 //! Tests that depend on jq-1.8.x should call [`require_jq`] at the top of
 //! their `#[test]` body. It panics on CI (so missing-binary configuration
 //! errors fail loud) and returns `None` locally (so `cargo test` is usable
-//! without 1.8.1 installed).
+//! without jq installed). The reference version is 1.8.2 (#1144) — a 1.8.1
+//! binary passes the version gate but fails the corpus rows that pin 1.8.2
+//! behavior (error-message value dumps, trimstr, @urid).
 
 use std::ffi::OsStr;
 use std::process::Command;

@@ -886,13 +886,9 @@ pub fn call_builtin_op(op: RtBuiltin, args: &[Value]) -> Result<Value> {
                 Value::Str(s) => match s.as_str() {
                     "true" => Ok(Value::True),
                     "false" => Ok(Value::False),
-                    _ => bail!("string ({:?}) cannot be parsed as a boolean", s.as_str()),
+                    _ => bail!("{} cannot be parsed as a boolean", errdesc(v)),
                 },
-                _ => {
-                    let ty = v.type_name();
-                    let json = crate::value::value_to_json(v);
-                    bail!("{} ({}) cannot be parsed as a boolean", ty, json);
-                }
+                _ => bail!("{} cannot be parsed as a boolean", errdesc(v)),
             }
         }),
         RtBuiltin::Bsearch => {
@@ -1084,12 +1080,13 @@ fn const_fold_seq(expr: &crate::ir::Expr) -> Option<Vec<Value>> {
 
 fn errdesc(v: &Value) -> String {
     // For numbers, prefer the canonical form of the original repr (so
-    // `1.0` stays `"1.0"`, `1e30` becomes `"1E+30"` matching jq's decnum
-    // output) — but only when the repr round-trips exactly through f64.
-    // For repr that can't round-trip (e.g. 25+ digit literals) and for
-    // computed values without a repr, fall back to Rust's decimal Display
-    // so huge magnitudes show "12345678901234568000000000..." like jq's
-    // non-decnum form does.
+    // `1.0` stays `"1.0"`, `1e30` becomes `"1E+30"`, and 18+ digit literals
+    // keep their digits) matching jq's decnum dump, which preserves the
+    // literal even when it does not round-trip through f64 — 1.8.1's 11-byte
+    // preview hid the tail where the forms diverge, 1.8.2's 26-byte window
+    // exposes it (#1144). Infinities still render clamped (jq converts
+    // out-of-double-range literals on parse), and computed values without a
+    // repr fall back to Rust's decimal Display.
     let json = match v {
         Value::Num(n, NumRepr(repr)) => {
             if n.is_nan() { "null".to_string() }
@@ -1097,7 +1094,7 @@ fn errdesc(v: &Value) -> String {
                 if n.is_sign_positive() { "1.7976931348623157e+308".to_string() }
                 else { "-1.7976931348623157e+308".to_string() }
             } else if let Some(canon) = repr.as_ref()
-                .filter(|r| crate::value::is_valid_json_number(r) && crate::value::repr_is_exact_for_f64(r, *n))
+                .filter(|r| crate::value::is_valid_json_number(r))
                 .map(|r| crate::value::canonical_repr_bytes(r).into_owned())
             {
                 canon
@@ -1114,17 +1111,35 @@ fn errdesc(v: &Value) -> String {
     };
     let tn = v.type_name();
     let jlen = json.len();
-    // jq 1.8.1 truncates errdesc previews when the JSON repr is > 14 bytes:
-    // it takes the first 11 bytes (backed up to a UTF-8 char boundary) and
-    // appends `...`. This matches both strings (no closing `"`) and other
-    // types (`array (...`, `object (...`, `number (...`). See #465.
-    if jlen > 14 {
-        let mut end = 11.min(jlen);
+    // jq 1.8.2 truncates errdesc previews with a uniform 30-byte budget
+    // (`jv_dump_string_trunc`, every call site passes `errbuf[30]`): a dumped
+    // repr longer than 29 bytes keeps its first 25 bytes when the repr opens
+    // with a delimiter (`"` `[` `{` — 24 content chars for strings), else 26,
+    // backed up to a UTF-8 char boundary, then `...` plus the closing
+    // delimiter. Through 1.8.1 previews kept 11 bytes with no closing
+    // delimiter (#465); jqlang/jq#3478 widened and closed them (#1144).
+    if jlen > 29 {
+        let delim = match json.as_bytes()[0] {
+            b'"' => Some('"'),
+            b'[' => Some(']'),
+            b'{' => Some('}'),
+            _ => None,
+        };
+        let mut end = if delim.is_some() { 25 } else { 26 };
         while end > 0 && !json.is_char_boundary(end) { end -= 1; }
-        format!("{} ({}...)", tn, &json[..end])
+        match delim {
+            Some(d) => format!("{} ({}...{})", tn, &json[..end], d),
+            None => format!("{} ({}...)", tn, &json[..end]),
+        }
     } else {
         format!("{} ({})", tn, json)
     }
+}
+
+/// `errdesc` for a bare string key (JIT raw fast paths hold `&str`, not a
+/// `Value`): renders `string ("<key>")` with the same jq 1.8.2 truncation.
+pub fn errdesc_str(key: &str) -> String {
+    errdesc(&Value::from_str(key))
 }
 
 fn unary_op(args: &[Value], f: impl FnOnce(&Value) -> Result<Value>) -> Result<Value> {
@@ -1649,9 +1664,20 @@ fn rt_reverse(v: &Value) -> Result<Value> {
         // `[.[length-1, length-2 ..0]]` desugar yields []. Non-zero
         // (including NaN) errors via the `.[idx]` step (#328).
         Value::Num(n, _) if *n == 0.0 => Ok(Value::Arr(Rc::new(vec![]))),
-        Value::Str(_) => bail!("Cannot index string with number"),
-        Value::Obj(_) => bail!("Cannot index object with number"),
-        Value::Num(_, _) => bail!("Cannot index number with number"),
+        // The desugar's first access is `.[length-1]`, so jq dumps that
+        // index as the key (#1144).
+        Value::Str(s) => bail!(
+            "Cannot index string with number ({})",
+            crate::value::format_jq_number(s.chars().count() as f64 - 1.0)
+        ),
+        Value::Obj(ObjInner(o)) => bail!(
+            "Cannot index object with number ({})",
+            crate::value::format_jq_number(o.len() as f64 - 1.0)
+        ),
+        Value::Num(n, _) => bail!(
+            "Cannot index number with number ({})",
+            crate::value::format_jq_number(n.abs() - 1.0)
+        ),
         // errdesc keeps repr/truncation consistent across error sites (#580).
         Value::True | Value::False => bail!("{} has no length", errdesc(v)),
     }
@@ -2226,7 +2252,7 @@ pub(crate) fn rt_from_entries(v: &Value) -> Result<Value> {
                     // the entry surfaces the standard `Cannot index <type>
                     // with string "key"` error.
                     other => bail!(
-                        "Cannot index {} with string \"key\"",
+                        "Cannot index {} with string (\"key\")",
                         other.type_name(),
                     ),
                 }
@@ -2260,8 +2286,10 @@ pub(crate) fn rt_transpose(v: &Value) -> Result<Value> {
     for item in items.iter() {
         match item {
             Value::Arr(_) | Value::Null => {}
+            // jq's transpose desugar fails at `map(.[$i])` with $i = 0 on the
+            // first scalar row, so the dumped key is always 0 (#1144).
             other => bail!(
-                "Cannot index {} with number",
+                "Cannot index {} with number (0)",
                 other.type_name(),
             ),
         }
@@ -2439,10 +2467,10 @@ fn rt_ltrimstr(v: &Value, prefix: &Value) -> Result<Value> {
 
 fn rt_rtrimstr(v: &Value, suffix: &Value) -> Result<Value> {
     match (v, suffix) {
-        // rtrimstr("") is defined as `if endswith($s) then .[:-($s|length)] end`.
-        // With $s="" that reduces to .[:-0]; jq's slice semantics make -0 end-indexed,
-        // so the result is the empty string.
-        (Value::Str(_), Value::Str(p)) if p.is_empty() => Ok(Value::from_str("")),
+        // jq 1.8.2 defines rtrimstr as `.[:length - ($s|length)]` (absolute
+        // slice end, jqlang/jq#3415), so rtrimstr("") returns the input
+        // unchanged. Through 1.8.1 the `.[:-($s|length)]` definition made
+        // `""` slice to `.[:-0]` = `""` — that bug is gone (#1144).
         (Value::Str(s), Value::Str(p)) => {
             if let Some(rest) = s.strip_suffix(p.as_str()) {
                 Ok(Value::from_str(rest))
@@ -2636,11 +2664,11 @@ fn rt_str_index(v: &Value, target: &Value, is_rindex: bool) -> Result<Value> {
                 Value::Null => Ok(Value::Null),
                 _ => {
                     // Scalar from object lookup: jq's `.[0]` / `.[-1:][0]` on a
-                    // scalar errors with these specific wordings.
+                    // scalar errors with these specific keys dumped (#1144).
                     if is_rindex {
-                        bail!("Cannot index {} with object", inner.type_name())
+                        bail!("Cannot index {} with object ({{\"start\":-1,\"end\":null}})", inner.type_name())
                     } else {
-                        bail!("Cannot index {} with number", inner.type_name())
+                        bail!("Cannot index {} with number (0)", inner.type_name())
                     }
                 }
             }
@@ -2891,14 +2919,11 @@ fn slice_indices(slice_spec: &crate::value::ObjMap, len: i64) -> (usize, usize) 
 /// Match jq 1.8.1's "Cannot index X with Y" wording for the Y side.
 /// Numbers omit the value; strings keep the quoted content; others show the type name.
 pub fn index_err_desc(key: &Value) -> String {
-    match key {
-        Value::Str(s) => format!("string \"{}\"", s),
-        Value::Num(_, _) => "number".to_string(),
-        Value::Null => "null".to_string(),
-        Value::True | Value::False => "boolean".to_string(),
-        Value::Arr(_) => "array".to_string(),
-        Value::Obj(_) => "object".to_string(),
-    }
+    // jq 1.8.2 renders every "Cannot index X with Y" key as
+    // `kind (dumped-value)` — jv_get formats via jv_dump_string_trunc
+    // uniformly (jqlang/jq#3478), replacing 1.8.1's mixed forms
+    // (`string "k"` / bare kind). That is exactly `errdesc` (#1144).
+    errdesc(key)
 }
 
 pub fn rt_setpath(v: &Value, path: &Value, val: &Value) -> Result<Value> {
@@ -2952,12 +2977,10 @@ pub fn rt_setpath(v: &Value, path: &Value, val: &Value) -> Result<Value> {
                     Ok(Value::Arr(Rc::new(arr)))
                 }
                 (Value::Obj(_), Value::Num(_, _)) => {
-                    // jq: number keys omit the value (#440).
-                    bail!("Cannot index object with number");
+                    bail!("Cannot index object with {}", errdesc(key));
                 }
-                (Value::Arr(_), Value::Str(k)) => {
-                    // jq: string keys are quoted without parens (#440).
-                    bail!("Cannot index array with string \"{}\"", k);
+                (Value::Arr(_), Value::Str(_)) => {
+                    bail!("Cannot index array with {}", errdesc(key));
                 }
                 // Slice assignment: path element is an object. jq's order is
                 // (1) base must be Arr/Str/Null, else "Cannot index X with
@@ -3049,7 +3072,7 @@ pub fn rt_setpath_mut(v: &mut Value, path: &[Value], val: Value) -> Result<()> {
                 }
                 Ok(())
             } else {
-                bail!("Cannot index {} with string \"{}\"", v.type_name(), k);
+                bail!("Cannot index {} with {}", v.type_name(), errdesc(key));
             }
         }
         Value::Num(n, _) => {
@@ -3082,9 +3105,7 @@ pub fn rt_setpath_mut(v: &mut Value, path: &[Value], val: Value) -> Result<()> {
                 }
                 Ok(())
             } else {
-                // jq: number keys omit the value (#440).
-                let _ = n;
-                bail!("Cannot index {} with number", v.type_name());
+                bail!("Cannot index {} with {}", v.type_name(), errdesc(key));
             }
         }
         // Slice assignment: same semantics as `rt_setpath`'s slice arm.
@@ -3131,7 +3152,7 @@ pub fn rt_setpath_mut(v: &mut Value, path: &[Value], val: Value) -> Result<()> {
                     *v = Value::Arr(Rc::new(replacement));
                     Ok(())
                 }
-                _ => bail!("Cannot index {} with object", v.type_name()),
+                _ => bail!("Cannot index {} with {}", v.type_name(), errdesc(key)),
             }
         }
         // jq's special-case wording for array-key on array-container; the
@@ -3268,10 +3289,9 @@ fn delete_path(v: &Value, path: &Value) -> Result<Value> {
                     Ok(Value::object_from_map(new_obj))
                 }
                 (Value::Arr(a), Value::Num(n, _)) => {
-                    // A NaN array index casts to 0 and would silently delete
-                    // element 0; reject it, mirroring the set path's guard.
-                    // (Upstream jq hangs here — see #921 — so we do not match it.)
-                    if n.is_nan() { bail!("Cannot delete array element at NaN index"); }
+                    // del(.[nan]) is a no-op since jq 1.8.2 (jqlang/jq#3490 fixed the
+                    // 1.8.1 hang tracked in #921) — the NaN index matches nothing (#1144).
+                    if n.is_nan() { return Ok(Value::Arr(a.clone())); }
                     let ni = *n as i64;
                     let idx = if ni < 0 { a.len() as i64 + ni } else { ni };
                     if idx >= 0 && (idx as usize) < a.len() {
@@ -3295,8 +3315,8 @@ fn delete_path(v: &Value, path: &Value) -> Result<Value> {
                     Ok(Value::Arr(Rc::new(new_arr)))
                 }
                 // Match jq 1.8.1's error wording for type-incompatible paths (issue #77).
-                (Value::Obj(_), key) => bail!("Cannot delete {} field of object", index_err_desc(key)),
-                (Value::Arr(_), key) => bail!("Cannot delete {} element of array", index_err_desc(key)),
+                (Value::Obj(_), key) => bail!("Cannot delete {} field of object", key.type_name()),
+                (Value::Arr(_), key) => bail!("Cannot delete {} element of array", key.type_name()),
                 (other, _) => bail!("Cannot delete fields from {}", other.type_name()),
             }
         }
@@ -3316,10 +3336,9 @@ fn delete_path(v: &Value, path: &Value) -> Result<Value> {
                     }
                 }
                 (Value::Arr(a), Value::Num(n, _)) => {
-                    // A NaN array index casts to 0 and would silently delete
-                    // element 0; reject it, mirroring the set path's guard.
-                    // (Upstream jq hangs here — see #921 — so we do not match it.)
-                    if n.is_nan() { bail!("Cannot delete array element at NaN index"); }
+                    // del(.[nan]) is a no-op since jq 1.8.2 (jqlang/jq#3490 fixed the
+                    // 1.8.1 hang tracked in #921) — the NaN index matches nothing (#1144).
+                    if n.is_nan() { return Ok(Value::Arr(a.clone())); }
                     let ni = *n as i64;
                     let idx = if ni < 0 { a.len() as i64 + ni } else { ni };
                     if idx >= 0 && (idx as usize) < a.len() {
@@ -3354,8 +3373,8 @@ fn delete_path(v: &Value, path: &Value) -> Result<Value> {
                     result.extend_from_slice(&a[ei..]);
                     Ok(Value::Arr(Rc::new(result)))
                 }
-                (Value::Obj(_), key) => bail!("Cannot delete {} field of object", index_err_desc(key)),
-                (Value::Arr(_), key) => bail!("Cannot delete {} element of array", index_err_desc(key)),
+                (Value::Obj(_), key) => bail!("Cannot delete {} field of object", key.type_name()),
+                (Value::Arr(_), key) => bail!("Cannot delete {} element of array", key.type_name()),
                 (other, _) => bail!("Cannot delete fields from {}", other.type_name()),
             }
         }

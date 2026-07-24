@@ -4272,11 +4272,10 @@ pub fn eval_index(base: &Value, key: &Value, optional: bool) -> std::result::Res
                 .unwrap_or(Value::Null))
         }
         (Value::Str(_), Value::Num(_, _)) => {
-            // jq's "Cannot index string with number" omits the value (#440).
             if optional {
                 Err("type error".into())
             } else {
-                Err("Cannot index string with number".to_string())
+                Err(format!("Cannot index string with {}", crate::runtime::errdesc_pub(key)))
             }
         }
         // jq aliases `.[arr]` on an array to `indices(arr)` — returns the
@@ -4320,16 +4319,9 @@ pub fn eval_index(base: &Value, key: &Value, optional: bool) -> std::result::Res
         _ => {
             if optional { Err("type error".into()) }
             else {
-                // jq's "Cannot index X with Y" wording: string keys are
-                // quoted without parens (`with string "k"`), number keys
-                // omit the value entirely (`with number`). See #440 and
-                // `runtime::index_err_desc`.
-                let key_desc = match key {
-                    Value::Str(s) => format!("string \"{}\"", s),
-                    Value::Num(_, _) => "number".to_string(),
-                    _ => key.type_name().to_string(),
-                };
-                Err(format!("Cannot index {} with {}", base.type_name(), key_desc))
+                // jq 1.8.2's "Cannot index X with Y" renders every key as
+                // `kind (dump)` — `runtime::index_err_desc` (#1144).
+                Err(format!("Cannot index {} with {}", base.type_name(), crate::runtime::index_err_desc(key)))
             }
         }
     }
@@ -4625,9 +4617,10 @@ pub fn eval_format(kind: &FormatKind, val: &Value) -> Result<String> {
             // hex digits, and a maximal run of consecutive `%XX` escapes must
             // decode to valid UTF-8 — a malformed escape (`%`, `%4`, `%GG`) or
             // an ill-formed escaped byte sequence (`%80`, `%C3`, `%C0%80`) is a
-            // hard `"string (X) is not a valid uri encoding"` error. A *raw*
-            // (non-escaped) input byte ≥ 0x80 is instead replaced per-byte with
-            // U+FFFD (so `"é"` → two U+FFFD), and raw ASCII passes through.
+            // hard `"string (X) is not a valid uri encoding"` error. Raw
+            // (non-escaped) characters pass through unchanged, multi-byte
+            // included — jq 1.8.2 fixed 1.8.1's per-byte U+FFFD mangling of
+            // raw non-ASCII input (jqlang/jq#3495, #1144).
             let bytes = s.as_bytes();
             let uri_err = || anyhow::anyhow!(
                 "string ({}) is not a valid uri encoding",
@@ -4656,9 +4649,11 @@ pub fn eval_format(kind: &FormatKind, val: &Value) -> Result<String> {
                     }
                 } else {
                     flush(&mut esc, &mut out)?;
-                    let b = bytes[i];
-                    if b < 0x80 { out.push(b as char); } else { out.push('\u{FFFD}'); }
-                    i += 1;
+                    // `s` is valid UTF-8, so a non-`%` position starts a whole
+                    // char; copy it verbatim.
+                    let c = s[i..].chars().next().unwrap();
+                    out.push(c);
+                    i += c.len_utf8();
                 }
             }
             flush(&mut esc, &mut out)?;
@@ -4873,8 +4868,16 @@ pub fn eval_slice(base: &Value, from: &Value, to: &Value) -> Result<Value> {
         Value::Null => Ok(Value::Null),
         // jq treats slice as a path access whose key is the {start, end}
         // object, so type errors share the "Cannot index X with object"
-        // wording rather than a slice-specific message. See #442.
-        _ => bail!("Cannot index {} with object", base.type_name()),
+        // wording (see #442) — with the synthesized key object dumped after
+        // the kind, omitted bounds as null (jq 1.8.2, #1144).
+        _ => bail!(
+            "Cannot index {} with {}",
+            base.type_name(),
+            crate::runtime::errdesc_pub(&Value::object_from_pairs([
+                ("start".to_string(), from.clone()),
+                ("end".to_string(), to.clone()),
+            ]))
+        ),
     }
 }
 
@@ -5479,7 +5482,14 @@ fn emit_slice_path(
     let base = crate::runtime::rt_getpath(input, bp).unwrap_or(Value::Null);
     match &base {
         Value::Arr(_) | Value::Str(_) | Value::Null => {}
-        other => bail!("Cannot index {} with object", other.type_name()),
+        other => bail!(
+            "Cannot index {} with {}",
+            other.type_name(),
+            crate::runtime::errdesc_pub(&Value::object_from_pairs([
+                ("start".to_string(), from_val.clone()),
+                ("end".to_string(), to_val.clone()),
+            ]))
+        ),
     }
     // jq preserves the literal slice expressions in path output without
     // clamping to the receiver's actual length. Omitted bounds → null.
@@ -5565,8 +5575,11 @@ fn source_nav_error(source: &Expr, input: &Value, env: &EnvRef) -> anyhow::Error
 /// Lower the path-transparent `*str` trim builtins to their jq slice
 /// definitions so the existing slice-path machinery produces jq's paths:
 ///   `ltrimstr($x)` → `if startswith($x) then .[($x|length):] else . end`
-///   `rtrimstr($x)` → `if endswith($x)   then .[:-($x|length)] else . end`
+///   `rtrimstr($x)` → `if endswith($x)   then .[:length - ($x|length)] else . end`
 ///   `trimstr($x)`  → `ltrimstr($x) | rtrimstr($x)`
+/// The rtrimstr slice end is absolute, matching jq 1.8.2's builtin.jq
+/// definition (jqlang/jq#3415) — through 1.8.1 it was `-($x|length)`, which
+/// surfaced negative `end` values in `path()` output (#1144).
 /// A no-match yields the identity path `[]`; a match yields the slice path
 /// (`[{start,end}]`), which `|=`/`=` reject with "Cannot update string slices"
 /// and `del` removes — exactly as jq does (#962). The startswith/endswith
@@ -5584,7 +5597,15 @@ fn lower_trimstr_path(op: BuiltinOp, arg: &Expr) -> Expr {
         },
         BuiltinOp::RtrimStr => Expr::IfThenElse {
             cond: Box::new(Expr::CallBuiltin { op: BuiltinOp::EndsWith, args: vec![arg.clone()] }),
-            then_branch: Box::new(Expr::Slice { expr: Box::new(Expr::Input), from: None, to: Some(Box::new(Expr::Negate { operand: Box::new(len_of_arg()) })) }),
+            then_branch: Box::new(Expr::Slice {
+                expr: Box::new(Expr::Input),
+                from: None,
+                to: Some(Box::new(Expr::BinOp {
+                    op: crate::ir::BinOp::Sub,
+                    lhs: Box::new(Expr::UnaryOp { op: crate::ir::UnaryOp::Length, operand: Box::new(Expr::Input) }),
+                    rhs: Box::new(len_of_arg()),
+                })),
+            }),
             else_branch: Box::new(Expr::Input),
         },
         // `trimstr` is `ltrimstr | rtrimstr`: a left match then a right match
@@ -5665,16 +5686,9 @@ fn eval_path(expr: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) 
                             // `Cannot index null with <type>` (#594).
                             (Value::Null, Value::Str(_) | Value::Num(_, _) | Value::Obj(_)) => {}
                             _ => {
-                                // jq's wording: string keys keep the quoted
-                                // value (`string "x"`), other key types use
-                                // the bare type name (`number`, `boolean`,
-                                // `null`). Aligns with the read-side fix from
-                                // #440. See #500.
-                                let key_desc = match &key {
-                                    Value::Str(s) => format!("string \"{}\"", s),
-                                    other => other.type_name().to_string(),
-                                };
-                                bail!("Cannot index {} with {}", base_val.type_name(), key_desc);
+                                // jq 1.8.2 renders every key as `kind (dump)`
+                                // (#500, #1144).
+                                bail!("Cannot index {} with {}", base_val.type_name(), crate::runtime::index_err_desc(&key));
                             }
                         }
                         let mut p = match bp { Value::Arr(a) => a.as_ref().clone(), _ => vec![] };
@@ -7550,7 +7564,8 @@ fn eval_truncate_stream(
         let arr = match &event {
             Value::Arr(a) => a.clone(),
             Value::Null => Rc::new(Vec::new()),
-            other => bail!("Cannot index {} with number", other.type_name()),
+            // The stream event is indexed at `.[0]`, so jq dumps that key (#1144).
+            other => bail!("Cannot index {} with number (0)", other.type_name()),
         };
         // jq reads `.[0]|length` leniently: a missing/non-array first element
         // just yields a length (0 for an absent/`null` `.[0]`), so a degenerate
@@ -7795,13 +7810,9 @@ fn rt_toboolean(v: &Value) -> Result<Value> {
         Value::Str(s) => match s.as_str() {
             "true" => Ok(Value::True),
             "false" => Ok(Value::False),
-            _ => bail!("string ({:?}) cannot be parsed as a boolean", s.as_str()),
+            _ => bail!("{} cannot be parsed as a boolean", crate::runtime::errdesc_pub(v)),
         },
-        _ => {
-            let ty = v.type_name();
-            let json = crate::value::value_to_json(v);
-            bail!("{} ({}) cannot be parsed as a boolean", ty, json);
-        }
+        _ => bail!("{} cannot be parsed as a boolean", crate::runtime::errdesc_pub(v)),
     }
 }
 
@@ -8083,12 +8094,12 @@ fn eval_del(f: &Expr, input: Value, env: &EnvRef, cb: &mut dyn FnMut(Value) -> G
                             if let Value::Arr(pa) = p {
                                 if pa.len() == 1 {
                                     if let Value::Num(n, _) = &pa[0] {
-                                        // A NaN index casts to 0 and would silently
-                                        // delete element 0; reject it, mirroring the
-                                        // set path and rt_delpaths. (Upstream jq hangs
-                                        // here — see #921 — so we do not match it.)
+                                        // del(.[nan]) is a no-op since jq 1.8.2
+                                        // (jqlang/jq#3490 fixed the 1.8.1 hang
+                                        // tracked in #921) — the NaN index matches
+                                        // nothing (#1144).
                                         if n.is_nan() {
-                                            bail!("Cannot delete array element at NaN index");
+                                            continue;
                                         }
                                         // Decide the negative-index offset from the
                                         // ORIGINAL float, not the truncated int:

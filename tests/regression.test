@@ -1178,7 +1178,7 @@ null
 # Issue #111: rtrimstr("") yields "" (jq slice -0 quirk)
 rtrimstr("")
 "hello"
-""
+"hello"
 
 # Issue #111: rtrimstr("") on empty string stays ""
 rtrimstr("")
@@ -6636,17 +6636,17 @@ null
 # jq treats slice as path access whose key is the {start, end} object.
 try .[:0] catch .
 false
-"Cannot index boolean with object"
+"Cannot index boolean with object ({\"start\":null,\"end\":0})"
 
 # Issue #442: same on numeric input
 try .[1:2] catch .
 5
-"Cannot index number with object"
+"Cannot index number with object ({\"start\":1,\"end\":2})"
 
 # Issue #442: same on object input (objects aren't sliceable)
 try .[:0] catch .
 {"a":1}
-"Cannot index object with object"
+"Cannot index object with object ({\"start\":null,\"end\":0})"
 
 # Issue #442: arrays/strings/null still slice normally (regression of the
 # success path against the new wording landing on errors)
@@ -6691,28 +6691,28 @@ null
 # (which the older jq.test corpus was lagging behind).
 try .a catch .
 false
-"Cannot index boolean with string \"a\""
+"Cannot index boolean with string (\"a\")"
 
 # Issue #440: same for numeric input
 try .a catch .
 5
-"Cannot index number with string \"a\""
+"Cannot index number with string (\"a\")"
 
 # Issue #440: number keys never include the value, even on string targets
 try .[1] catch .
 "hello"
-"Cannot index string with number"
+"Cannot index string with number (1)"
 
 # Issue #440: same on numeric/boolean targets
 try .[1] catch .
 true
-"Cannot index boolean with number"
+"Cannot index boolean with number (1)"
 
 # Issue #440: setpath shares the same wording (covers the runtime.rs site
 # the field-access fix doesn't reach)
 try setpath([1]; 1) catch .
 {"hi":"hello"}
-"Cannot index object with number"
+"Cannot index object with number (1)"
 
 # Issue #450: min/max wording mirrors jq's fold-based implementation —
 # the value appears twice ("X and X cannot be iterated over").
@@ -7291,7 +7291,7 @@ null
 # Issue #467: .[arr] still errors on string receivers
 "abcabc" | try .[["a"]] catch .
 null
-"Cannot index string with array"
+"Cannot index string with array ([\"a\"])"
 
 # Issue #467: path(.[arr]) yields the array as a single path element
 [1,2,3] | path(.[[1]])
@@ -7686,7 +7686,7 @@ null
 # Issue #465: errdesc truncates strings at 14 bytes (11 source + ...)
 try (. + 1) catch .
 "abcdefghijklmno"
-"string (\"abcdefghij...) and number (1) cannot be added"
+"string (\"abcdefghijklmno\") and number (1) cannot be added"
 
 # Issue #465: 14-byte string is exactly at threshold (no truncation)
 try (. + 1) catch .
@@ -7696,22 +7696,22 @@ try (. + 1) catch .
 # Issue #465: 15-byte string triggers truncation
 try (. + 1) catch .
 "abcdefghijklm"
-"string (\"abcdefghij...) and number (1) cannot be added"
+"string (\"abcdefghijklm\") and number (1) cannot be added"
 
 # Issue #465: errdesc truncates arrays
 try (. + 1) catch .
 [1,2,3,4,5,6,7,8,9,10]
-"array ([1,2,3,4,5,...) and number (1) cannot be added"
+"array ([1,2,3,4,5,6,7,8,9,10]) and number (1) cannot be added"
 
 # Issue #465: errdesc truncates objects
 try (. + 1) catch .
 {"a":1,"b":2,"c":3,"d":4,"e":5}
-"object ({\"a\":1,\"b\":...) and number (1) cannot be added"
+"object ({\"a\":1,\"b\":2,\"c\":3,\"d\":4,...}) and number (1) cannot be added"
 
 # Issue #465: errdesc truncates long numbers
 try (. + "x") catch .
 123456789012345
-"number (12345678901...) and string (\"x\") cannot be added"
+"number (123456789012345) and string (\"x\") cannot be added"
 
 # Issue #465: short strings unchanged
 try (. + 1) catch .
@@ -7721,17 +7721,17 @@ try (. + 1) catch .
 # Issue #465: multibyte truncation backs up to UTF-8 boundary
 try (. + 1) catch .
 "xxxx☆☆☆☆☆☆"
-"string (\"xxxx☆☆...) and number (1) cannot be added"
+"string (\"xxxx☆☆☆☆☆☆\") and number (1) cannot be added"
 
 # Issue #465: all-multibyte truncation
 try (. + 1) catch .
 "☆☆☆☆☆☆☆☆☆☆☆☆"
-"string (\"☆☆☆...) and number (1) cannot be added"
+"string (\"☆☆☆☆☆☆☆☆...\") and number (1) cannot be added"
 
 # Issue #465: 2-byte multibyte (é) truncation
 try (. + 1) catch .
 "éééééééééééééééé"
-"string (\"ééééé...) and number (1) cannot be added"
+"string (\"éééééééééééé...\") and number (1) cannot be added"
 
 # Issue #478: object with single-space comma is canonicalized
 .
@@ -7891,27 +7891,27 @@ null
 # Issue #500: path(.[0]) on a number errors without value tag
 try path(.[0]) catch .
 5
-"Cannot index number with number"
+"Cannot index number with number (0)"
 
 # Issue #500: path(.[0] // .[1]) preserves the same wording
 try path(.[0] // .[1]) catch .
 5
-"Cannot index number with number"
+"Cannot index number with number (0)"
 
 # Issue #500: path(.x) on a number keeps the string-key value
 try path(.x) catch .
 5
-"Cannot index number with string \"x\""
+"Cannot index number with string (\"x\")"
 
-# Issue #500: path(.[true]) — boolean key, no value
+# Issue #500 / #1144: path(.[true]) — boolean key dumps its value (jq 1.8.2)
 try path(.[true]) catch .
 5
-"Cannot index number with boolean"
+"Cannot index number with boolean (true)"
 
 # Issue #500: path(.[null]) — null key
 try path(.[null]) catch .
 5
-"Cannot index number with null"
+"Cannot index number with null (null)"
 
 # Issue #499: nested same-name `as $x` doesn't leak into outer scope
 5 as $x | (10 as $x | $x), $x
@@ -8091,17 +8091,17 @@ null
 # Issue #509: setpath bad key on object — uses "Cannot index" wording
 try setpath([null]; 1) catch .
 {"a":1}
-"Cannot index object with null"
+"Cannot index object with null (null)"
 
 # Issue #509: setpath bad key (boolean) on object
 try setpath([true]; 1) catch .
 {"a":1}
-"Cannot index object with boolean"
+"Cannot index object with boolean (true)"
 
 # Issue #509: setpath bad key (array) on object
 try setpath([[1]]; 1) catch .
 {"a":1}
-"Cannot index object with array"
+"Cannot index object with array ([1])"
 
 # Issue #509: array key on array container keeps the special wording
 try setpath([[1]]; 1) catch .
@@ -8111,12 +8111,12 @@ try setpath([[1]]; 1) catch .
 # Issue #509: setpath_mut path with string key on number includes value tag
 try (reduce range(1) as $_ (.; setpath(["a"]; 99))) catch .
 5
-"Cannot index number with string \"a\""
+"Cannot index number with string (\"a\")"
 
 # Issue #509: setpath_mut path with null key matches read-side wording
 try (reduce range(1) as $_ (.; setpath([null]; 99))) catch .
 5
-"Cannot index number with null"
+"Cannot index number with null (null)"
 
 # Issue #511: standalone low surrogate (\udcXX) renders as U+FFFD (length 1)
 "\udc00" | length
@@ -8241,22 +8241,22 @@ null
 # Issue #517: from_entries with number entry surfaces .key index error
 try ([1] | from_entries) catch .
 null
-"Cannot index number with string \"key\""
+"Cannot index number with string (\"key\")"
 
 # Issue #517: from_entries with string entry
 try (["x"] | from_entries) catch .
 null
-"Cannot index string with string \"key\""
+"Cannot index string with string (\"key\")"
 
 # Issue #517: from_entries with boolean entry
 try ([true] | from_entries) catch .
 null
-"Cannot index boolean with string \"key\""
+"Cannot index boolean with string (\"key\")"
 
 # Issue #517: from_entries with array entry
 try ([[1,2]] | from_entries) catch .
 null
-"Cannot index array with string \"key\""
+"Cannot index array with string (\"key\")"
 
 # Issue #517: empty object input still round-trips to {} (not iteration error)
 {} | from_entries
@@ -8723,12 +8723,12 @@ try transpose catch .
 # Issue #543: transpose on array of non-arrays surfaces row index error
 try transpose catch .
 [1,2]
-"Cannot index number with number"
+"Cannot index number with number (0)"
 
 # Issue #543: transpose on array with mixed array+non-array elements
 try transpose catch .
 [[1,2], 3]
-"Cannot index number with number"
+"Cannot index number with number (0)"
 
 # Issue #543: transpose on array of nulls treats them as empty rows
 transpose
@@ -8870,7 +8870,7 @@ getpath([[]])
 # Issue #549: getpath with array path element on string still errors (matches .[arr])
 try (getpath([[1,2]])) catch .
 "abc"
-"Cannot index string with array"
+"Cannot index string with array ([1,2])"
 
 # Issue #552: .a |= (.[]?) on object whose .a is a scalar deletes .a
 .a |= (.[]?)
@@ -8905,42 +8905,42 @@ try (getpath([[1,2]])) catch .
 # Issue #554: getpath fast path returned Null for type-mismatched keys instead of erroring (.a |= error on number)
 try (.a |= error) catch .
 0
-"Cannot index number with string \"a\""
+"Cannot index number with string (\"a\")"
 
 # Issue #554: same on string input
 try (.a |= error) catch .
 "x"
-"Cannot index string with string \"a\""
+"Cannot index string with string (\"a\")"
 
 # Issue #554: same on array input
 try (.a |= error) catch .
 [1]
-"Cannot index array with string \"a\""
+"Cannot index array with string (\"a\")"
 
 # Issue #554: getpath fast path no longer swallows null|getpath([null]) which jq errors on
 try (getpath([null])) catch .
 null
-"Cannot index null with null"
+"Cannot index null with null (null)"
 
 # Issue #554: getpath fast path no longer swallows getpath with boolean key
 try (getpath([true])) catch .
 [1]
-"Cannot index array with boolean"
+"Cannot index array with boolean (true)"
 
 # Issue #554: .a |= (1+.) still errors on non-object input (regression check)
 try (.a |= (1+.)) catch .
 0
-"Cannot index number with string \"a\""
+"Cannot index number with string (\"a\")"
 
 # Issue #556: . as $x | getpath(["a"]) lost outer input and silently returned null on number
 try (. as $x | getpath(["a"])) catch .
 0
-"Cannot index number with string \"a\""
+"Cannot index number with string (\"a\")"
 
 # Issue #556: . as $x | setpath(...) lost outer input and silently emitted modified-null
 try (. as $x | setpath(["a"]; 1)) catch .
 [1,2,3]
-"Cannot index array with string \"a\""
+"Cannot index array with string (\"a\")"
 
 # Issue #556: . as $x | delpaths(...) lost outer input and silently returned null
 try (. as $x | delpaths([["a"]])) catch .
@@ -9250,7 +9250,7 @@ try (.[]) catch .
 # Issue #574: long string repr is truncated with "..." like jq's errdesc
 try (.[]) catch .
 "1234567890123456789"
-"Cannot iterate over string (\"1234567890...)"
+"Cannot iterate over string (\"1234567890123456789\")"
 
 # Issue #574: integer numbers still render without forced decimal
 try (.[]) catch .
@@ -9360,7 +9360,7 @@ try (-.) catch .
 # Issue #580: long string truncation in negate error
 try (-.) catch .
 "1234567890123456789"
-"string (\"1234567890...) cannot be negated"
+"string (\"1234567890123456789\") cannot be negated"
 
 # Issue #582: range with non-arithmetic step emits `from` first then errors via `+`
 [try (range(0; 10; "a")) catch .]
@@ -9455,17 +9455,17 @@ try (. | (.[]) |= . + 1) catch .
 # Issue #594: path(.[KEY]) on null errors for bool key
 try (path(.[true])) catch .
 null
-"Cannot index null with boolean"
+"Cannot index null with boolean (true)"
 
 # Issue #594: path(.[KEY]) on null errors for null key
 try (path(.[null])) catch .
 null
-"Cannot index null with null"
+"Cannot index null with null (null)"
 
 # Issue #594: path(.[KEY]) on null errors for array key
 try (path(.[[1]])) catch .
 null
-"Cannot index null with array"
+"Cannot index null with array ([1])"
 
 # Issue #594: path(.[KEY]?) on null suppresses bool key
 [path(.[true]?)]
@@ -9641,7 +9641,7 @@ null
 # Issue #609: setpath slice on number still raises "Cannot index ..."
 try (setpath([{}]; "x")) catch .
 0
-"Cannot index number with object"
+"Cannot index number with object ({})"
 
 # Issue #609: setpath slice rhs must be array
 try (setpath([{"start":0,"end":1}]; "x")) catch .
@@ -12503,20 +12503,20 @@ reduce range(1) as $i (.; . % -1)
 -9223372036854775808
 0
 
-# #921: del with a NaN array index errors instead of silently deleting index 0 (top-level fast path).
+# #921 / #1144: del with a NaN array index is a no-op (jq 1.8.2, jqlang/jq#3490) — never deletes index 0 (top-level fast path).
 try del(.[nan]) catch .
 [10,20,30]
-"Cannot delete array element at NaN index"
+[10,20,30]
 
 # #921: del with a NaN array index through a nested path also errors.
 try del(.a[nan]) catch .
 {"a":[1,2,3]}
-"Cannot delete array element at NaN index"
+{"a":[1,2,3]}
 
 # #921: delpaths with a NaN array index errors (mixed with a valid path).
 try delpaths([[0],[nan]]) catch .
 [10,20,30]
-"Cannot delete array element at NaN index"
+[20,30]
 
 # #932: implode of a negative codepoint clamps to U+FFFD on the JIT fast path (was U+0000).
 [-1]|implode|explode
@@ -12736,12 +12736,12 @@ path(any(.[]; .x))
 # #917: path(recurse(f)) propagates the per-step leaf type error
 try ([path(recurse(.a))]) catch .
 {"a":{"a":1}}
-"Cannot index number with string \"a\""
+"Cannot index number with string (\"a\")"
 
 # #917: 2-arg recurse(f; cond) likewise propagates the leaf error
 try ([path(recurse(.a; true))]) catch .
 {"a":{"a":1}}
-"Cannot index number with string \"a\""
+"Cannot index number with string (\"a\")"
 
 # #917: path(recurse(f)) follows the step f, not the default descent
 [limit(5; path(recurse(.a)))]
@@ -12861,17 +12861,17 @@ try ((foreach .[] as $x (0; .+$x; .)) |= 99) catch .
 # #964: reduce in-place update-assign must not mask index type errors (string key on array)
 try (reduce .[] as $x (.; .sum += $x)) catch .
 [1,2,3]
-"Cannot index array with string \"sum\""
+"Cannot index array with string (\"sum\")"
 
 # #964: reduce in-place update-assign masking (number key on object)
 try (reduce 0 as $k (.; .[$k] += 1)) catch .
 {"x":0}
-"Cannot index object with number"
+"Cannot index object with number (0)"
 
 # #964: masked error in a multi-level reduce update (.bad.k on an array element)
 try (reduce .[] as $x ({"ok":0,"bad":[1]}; .ok += $x | .bad.k += $x)) catch .
 [10,20]
-"Cannot index array with string \"k\""
+"Cannot index array with string (\"k\")"
 
 # #964: an inner try inside the reduce body still catches the per-iteration error
 reduce .[] as $x (.; try (.sum += $x) catch "ERR")
@@ -12941,12 +12941,12 @@ path(ltrimstr("a"))
 # #962: rtrimstr match yields a trailing slice path
 path(rtrimstr("c"))
 "abc"
-[{"start":null,"end":-1}]
+[{"start":null,"end":2}]
 
 # #962: trimstr match composes two slice components (ltrimstr | rtrimstr)
 path(trimstr("a"))
 "abca"
-[{"start":1,"end":null},{"start":null,"end":-1}]
+[{"start":1,"end":null},{"start":null,"end":2}]
 
 # #962: ltrimstr no-match under |= updates the whole value (identity path)
 ltrimstr("x") |= "Z"
@@ -13011,7 +13011,7 @@ try @urid catch .
 # #961: @urid replaces a raw non-ASCII input byte per-byte with U+FFFD
 @urid
 "é"
-"��"
+"é"
 
 # #961: @urid raw ASCII passes through, escaped non-ASCII decodes
 @urid
@@ -13037,7 +13037,7 @@ null
 # against the document the element lives in, not the rootless accumulator
 try [path(foreach .[] as $x (0; .; $x.b))] catch .
 {"a":{"b":2},"c":3}
-"Cannot index number with string \"b\""
+"Cannot index number with string (\"b\")"
 
 # #953: when every element is indexable the $x-anchored paths are document-rooted
 [path(foreach .[] as $x (0; .; $x.b))]
@@ -13047,7 +13047,7 @@ try [path(foreach .[] as $x (0; .; $x.b))] catch .
 # #953: $x[i] index validation likewise checks the document element's type
 try [path(foreach .[] as $x (0; .; $x[0]))] catch .
 {"a":[1],"c":3}
-"Cannot index number with number"
+"Cannot index number with number (0)"
 
 # #953: a bare $x still forwards the element spine (unchanged, #711/#915)
 [path(foreach .[] as $x (0; .; $x))]
@@ -13076,12 +13076,12 @@ null
 # #981: @base64d invalid-data error truncates the embedded value like other sites
 try @base64d catch .
 "aaaaaaaaaaaaaa%"
-"string (\"aaaaaaaaaa...) is not valid base64 data"
+"string (\"aaaaaaaaaaaaaa%\") is not valid base64 data"
 
 # #981: @base64d trailing-byte error also truncates the embedded value
 try @base64d catch .
 "aaaaaaaaaaaaaaaaa"
-"string (\"aaaaaaaaaa...) trailing base64 byte found"
+"string (\"aaaaaaaaaaaaaaaaa\") trailing base64 byte found"
 
 # #981: short values are still shown in full (untruncated)
 try @base64d catch .
@@ -13221,7 +13221,7 @@ try path(.a | {x:.}) catch .
 # #998: select(.field|length CMP N) on a non-object raises the index type error
 try select(.a | length > 0) catch .
 5
-"Cannot index number with string \"a\""
+"Cannot index number with string (\"a\")"
 
 # #998: object missing the field compares length against 0
 select(.a | length == 0)
@@ -13636,7 +13636,7 @@ del(.[] | select(. == 2))
 # #1059 Phase 3: delegated path() validation error stays catchable
 5 | [try path(.[0]) catch .]
 null
-["Cannot index number with number"]
+["Cannot index number with number (0)"]
 
 # #1059 Phase 3: paths through nested generators via the delegate
 [path(.a[].b)]
@@ -14243,3 +14243,68 @@ del(.b)
 del(.name)
 {"x":1,"y":1e3,"name":"n"}
 {"x":1,"y":1E+3}
+
+# #1144: @urid passes raw multi-byte characters through unchanged (jq 1.8.2, jqlang/jq#3495)
+[("é", "café", "é%C3%A9", "a//b é") | @urid]
+null
+["é","café","éé","a//b é"]
+
+# #1144: null indexed with boolean/null/array keys raises (JIT previously returned null; #193)
+[try (null | .[true]) catch ., try (null | .[null]) catch ., try (null | .[[1]]) catch .]
+null
+["Cannot index null with boolean (true)","Cannot index null with null (null)","Cannot index null with array ([1])"]
+
+# #1144: null[bool] in an update path also raises
+try (null | .[true] = 1) catch .
+null
+"Cannot index null with boolean (true)"
+
+# #1144: error dump truncates at the 30-byte budget with a closing delimiter (jq 1.8.2, jqlang/jq#3478)
+try .["verylongkeyaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"] catch .
+[1]
+"Cannot index array with string (\"verylongkeyaaaaaaaaaaaaa...\")"
+
+# #1144: error dump truncation backs up to a UTF-8 char boundary
+try ("☆☆☆☆☆☆☆☆☆☆☆☆" + 1) catch .
+null
+"string (\"☆☆☆☆☆☆☆☆...\") and number (1) cannot be added"
+
+# #1144: error dump preserves long literal digits like jq's decNumber (not the f64 rounding)
+try (12345678901234567890123456789012345678 | .[]) catch .
+null
+"Cannot iterate over number (12345678901234567890123456...)"
+
+# #1144: slice type errors dump the synthesized {start, end} key object (jq 1.8.2)
+[try (true | .[1:2]) catch ., try ({} | .[:2]) catch ., try (true | .[1:2] = 3) catch .]
+null
+["Cannot index boolean with object ({\"start\":1,\"end\":2})","Cannot index object with object ({\"start\":null,\"end\":2})","Cannot index boolean with object ({\"start\":1,\"end\":2})"]
+
+# #1144: rtrimstr path uses an absolute slice end (jq 1.8.2, jqlang/jq#3415)
+[path(rtrimstr("ca")), path(trimstr("a")), path(rtrimstr(""))]
+"abca"
+[[{"start":null,"end":2}],[{"start":1,"end":null},{"start":null,"end":2}],[{"start":null,"end":4}]]
+
+# #1144: delete errors keep the kind-only wording (unchanged in jq 1.8.2)
+[try delpaths([["a"]]) catch ., try ({"a":1} | delpaths([[true]])) catch .]
+[1]
+["Cannot delete string element of array","Cannot delete boolean field of object"]
+
+# #1144: toboolean dumps the offending value with the same errdesc escaping/truncation
+try ("true\u0000x" | toboolean) catch .
+null
+"string (\"true\\u0000x\") cannot be parsed as a boolean"
+
+# #1144: reverse on a non-reversible input dumps the .[length-1] key it accessed
+[try ("ab" | reverse) catch ., try (5 | reverse) catch .]
+null
+["Cannot index string with number (1)","Cannot index number with number (4)"]
+
+# #1144: index/rindex on a scalar receiver dump the fallback access key
+[try (5 | index("a")) catch ., try ({"a":1} | index("a")) catch ., try ({"a":1} | rindex("a")) catch .]
+null
+["Cannot index number with string (\"a\")","Cannot index number with number (0)","Cannot index number with object ({\"start\":-1,\"end\":null})"]
+
+# #1144: transpose and from_entries dump their internal access keys
+[try ([[1],5] | transpose) catch ., try ([[1,"x"]] | from_entries) catch .]
+null
+["Cannot index number with number (0)","Cannot index array with string (\"key\")"]

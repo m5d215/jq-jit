@@ -26,7 +26,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install jq 1.8.1 (for differential tests)
+      - name: Install jq 1.8.2 (for differential tests)
         shell: bash
         run: |
           case "${{ runner.os }}-${{ runner.arch }}" in
@@ -37,9 +37,9 @@ jobs:
             Windows-X64)  asset=jq-windows-amd64.exe; binary=jq.exe ;;
             *) echo "unsupported runner: ${{ runner.os }}-${{ runner.arch }}"; exit 1 ;;
           esac
-          dest="$RUNNER_TEMP/jq181"
+          dest="$RUNNER_TEMP/jq182"
           mkdir -p "$dest"
-          curl -L -o "$dest/$binary" "https://github.com/jqlang/jq/releases/download/jq-1.8.1/${asset}"
+          curl -L -o "$dest/$binary" "https://github.com/jqlang/jq/releases/download/jq-1.8.2/${asset}"
           chmod +x "$dest/$binary"
           "$dest/$binary" --version | grep -q '^jq-1\.8\.'
           echo "JQ_BIN=$dest/$binary" >> "$GITHUB_ENV"
