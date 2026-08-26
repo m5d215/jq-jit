@@ -6209,14 +6209,21 @@ pub fn push_jq_number_str(buf: &mut String, n: f64) {
 /// should be kept, or `None` when the caller must fall back to the
 /// computed-f64 writer ([`write_jq_number`]).
 ///
-/// The repr is kept in two cases:
-/// - it round-trips exactly per `repr_is_exact_for_f64` (emitted in jq's
-///   canonical uppercase-E decnum form, so `1.0` stays `1.0` and `0e10`
-///   becomes `0E+10`);
-/// - subnormal/precision-edge literals (#616): `repr_is_exact_for_f64` is
-///   too conservative for >15-sig-digit mantissas and exponents < -323,
-///   but the canonical literal still round-trips through f64 — e.g.
-///   DBL_MAX `1.7976931348623157e308` and the smallest subnormal `5e-324`.
+/// A preserved repr is always kept, emitted in jq's canonical uppercase-E
+/// decnum form (`1.0` stays `1.0`, `0e10` becomes `0E+10`). This is the same
+/// rule the value printer applies (`write_value_compact_ext_inner` and the
+/// fixed-buffer writer both take `canonical_repr_bytes(repr)` unconditionally),
+/// and the two paths must agree: they render the same `Value::Num`.
+///
+/// The repr deliberately wins even when f64 cannot represent it — that is the
+/// whole point of preserving it, and it is how jq's decnum literals survive
+/// `tostring` / `tojson` / `@csv` / `@text`. Gating on an f64 round-trip used
+/// to drop the literal here while the value printer kept it, so `1e500` printed
+/// as `1E+500` but `1e500 | tostring` as `"1.7976931348623157e+308"` (#1149,
+/// found by the nightly differential fuzz; supersedes the output half of #415).
+///
+/// Note this covers *output* only. jq-jit stays f64 for comparison and
+/// arithmetic, so `have_decnum` remains `false` — see `docs/maintenance.md`.
 fn num_repr_text<'a>(n: f64, repr: Option<&'a Rc<str>>) -> Option<std::borrow::Cow<'a, str>> {
     // One-pass fast path for the dominant lexeme shape in number-heavy hot
     // loops (#1077): a plain short decimal is simultaneously a valid JSON
@@ -6228,29 +6235,31 @@ fn num_repr_text<'a>(n: f64, repr: Option<&'a Rc<str>>) -> Option<std::borrow::C
             return Some(std::borrow::Cow::Borrowed(&**r));
         }
     }
-    if let Some(r) = repr.filter(|r| is_valid_json_number(r) && repr_is_exact_for_f64(r, n)) {
-        return Some(match normalize_jq_repr(r) {
-            Some(canonical) => std::borrow::Cow::Owned(canonical),
-            None => std::borrow::Cow::Borrowed(&**r),
-        });
+    // Every computed value reaches here with `repr == None`, so short-circuit on
+    // that before touching `n` — the checks below are only worth running when a
+    // literal was actually preserved.
+    let r = repr?;
+    // NaN never carries a repr: the `nan` literal is built without one and no
+    // JSON-valid number lexes to NaN. Keep the guard anyway so
+    // `push_num_tojson_str` can still promise `null` for it.
+    if n.is_nan() || !is_valid_json_number(r) {
+        return None;
     }
-    repr.filter(|r| is_valid_json_number(r) && n.is_finite() && n != 0.0)
-        .and_then(|r| normalize_jq_repr(r))
-        .filter(|c| c.as_str().parse::<f64>().ok() == Some(n))
-        .map(std::borrow::Cow::Owned)
+    Some(match normalize_jq_repr(r) {
+        Some(canonical) => std::borrow::Cow::Owned(canonical),
+        None => std::borrow::Cow::Borrowed(&**r),
+    })
 }
 
 /// One-pass test for a plain decimal lexeme (optional `-`, integer part
 /// without leading zeros, optional non-empty fraction, no exponent) of at
 /// most 15 total digits whose fraction does not open with six zeros.
-/// Such a lexeme passes all three of `num_repr_text`'s checks verbatim:
-/// it is a valid JSON number by shape, exact for its paired f64
-/// (`repr_is_exact_for_f64` accepts any ≤15-sig-digit finite lexeme, and
-/// total digits bound sig digits), and `normalize_jq_repr` returns `None`
-/// for every plain decimal whose effective exponent stays in the
-/// canonical window — which the ≤15-digit and no-`.000000` constraints
-/// guarantee. Conservative by construction: any rejected lexeme simply
-/// takes the full checks.
+/// Such a lexeme passes both of `num_repr_text`'s checks verbatim: it is a
+/// valid JSON number by shape, and `normalize_jq_repr` returns `None` for
+/// every plain decimal whose effective exponent stays in the canonical
+/// window — which the ≤15-digit and no-`.000000` constraints guarantee.
+/// Conservative by construction: any rejected lexeme simply takes the full
+/// checks.
 #[inline]
 fn repr_is_short_canonical_plain(repr: &str) -> bool {
     let b = repr.as_bytes();
@@ -6791,28 +6800,27 @@ pub fn value_to_json_precise(v: &Value) -> String {
     value_to_json_depth(v, 0, true)
 }
 
-/// Convert Value to compact JSON string for `tojson`. Uses the repr when it
-/// exactly represents the stored f64, otherwise falls back to the f64 form.
-/// jq 1.8.1 decnum preserves all reprs; without decnum we can only honor the
-/// ones f64 can hold exactly (so `1.0` stays `"1.0"` but `13911860366432393`
-/// renders as the rounded `"13911860366432392"`).
+/// Convert Value to compact JSON string for `tojson`. Keeps the preserved
+/// literal repr in jq's canonical form, matching both the value printer and
+/// jq's decnum output — so `1.0` stays `"1.0"` and `13911860366432393` stays
+/// `"13911860366432393"` rather than collapsing to the nearest double (#1149).
 pub fn value_to_json_tojson(v: &Value) -> String {
     let mut out = String::new();
     push_value_tojson(v, &mut out, 0);
     out
 }
 
-/// Append a number in tojson/tostring form: a valid, exactly round-tripping
-/// literal repr is kept in jq's canonical (uppercase-E decnum) form; anything
-/// else — a computed value, a NaN/Infinity lexeme (`nan`, `infinity`), or a
-/// repr that doesn't round-trip — takes the canonical f64 writer (`null` for
-/// NaN, the clamped max double for Infinity). Shared by `tojson`/`tostring`,
-/// the JIT string-interpolation buffer, and `@json`/`@text` so a parsed-input
-/// NaN or non-canonical lexeme cannot leak through one formatter after being
-/// fixed in another (#771, #1021).
+/// Append a number in tojson/tostring form: a valid literal repr is kept in
+/// jq's canonical (uppercase-E decnum) form; anything else — a computed value
+/// or a NaN/Infinity lexeme (`nan`, `infinity`), neither of which carries a
+/// repr — takes the canonical f64 writer (`null` for NaN, the clamped max
+/// double for Infinity). Shared by `tojson`/`tostring`, the JIT
+/// string-interpolation buffer, and `@json`/`@text` so a parsed-input NaN or
+/// non-canonical lexeme cannot leak through one formatter after being fixed in
+/// another (#771, #1021).
 pub fn push_num_tojson_str(out: &mut String, n: f64, repr: Option<&Rc<str>>) {
     // Same repr selection as the @csv/@tsv writers (see `num_repr_text`);
-    // here a NaN — whose repr never qualifies — falls through to the
+    // here a NaN — which never carries a repr — falls through to the
     // canonical f64 writer and renders as `null`.
     match num_repr_text(n, repr) {
         Some(text) => out.push_str(&text),
@@ -6850,48 +6858,6 @@ fn push_value_tojson(v: &Value, out: &mut String, depth: usize) {
             out.push('}');
         }
     }
-}
-
-/// True iff `repr` (a JSON-valid decimal literal) represents a value that f64
-/// can hold exactly. Rejects mantissas with more than 15 significant decimal
-/// digits and exponents outside f64's dynamic range.
-pub(crate) fn repr_is_exact_for_f64(repr: &str, n: f64) -> bool {
-    if !n.is_finite() { return false; }
-    let bytes = repr.as_bytes();
-    let mut i = 0;
-    if matches!(bytes.first(), Some(b'-') | Some(b'+')) { i += 1; }
-    let mut sig_digits = 0u32;
-    let mut trailing_zeros = 0u32;
-    let mut started = false;
-    while i < bytes.len() && bytes[i] != b'e' && bytes[i] != b'E' {
-        let c = bytes[i];
-        if c == b'.' { i += 1; continue; }
-        if !c.is_ascii_digit() { return false; }
-        if c != b'0' { started = true; trailing_zeros = 0; }
-        if started {
-            sig_digits += 1;
-            if c == b'0' { trailing_zeros += 1; }
-        }
-        i += 1;
-    }
-    let mut exp_val: i32 = 0;
-    if i < bytes.len() {
-        i += 1;
-        let mut exp_neg = false;
-        if matches!(bytes.get(i), Some(b'-')) { exp_neg = true; i += 1; }
-        else if matches!(bytes.get(i), Some(b'+')) { i += 1; }
-        while i < bytes.len() && bytes[i].is_ascii_digit() {
-            exp_val = exp_val.saturating_mul(10).saturating_add((bytes[i] - b'0') as i32);
-            i += 1;
-        }
-        if exp_neg { exp_val = -exp_val; }
-    }
-    if exp_val > 308 || exp_val < -323 { return false; }
-    // Trailing zeros (after the last non-zero digit, integer or fractional)
-    // do not contribute precision: `100000000000000.0` has effective sig=1
-    // even though the digit count is 16. Subtract them so the cap matches
-    // the actual precision the literal claims.
-    sig_digits.saturating_sub(trailing_zeros) <= 15
 }
 
 fn value_to_json_depth(v: &Value, depth: usize, precise: bool) -> String {

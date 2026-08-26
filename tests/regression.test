@@ -8048,10 +8048,12 @@ null
 null
 "100.50"
 
-# Issue #507: literal with significant non-zero digits beyond 15 still drops repr
+# Issue #507 / #1149: a literal with significant non-zero digits beyond 15 keeps
+# its repr through tojson (it used to collapse to the nearest double, giving 17).
+# jq 1.8.2 agrees: "13911860366432393.0" is 19 characters.
 13911860366432393.0 | tojson | length
 null
-17
+19
 
 # Issue #509: getpath with non-array path uses jq's "Path must be specified as an array"
 try getpath("x") catch .
@@ -14308,3 +14310,26 @@ null
 [try ([[1],5] | transpose) catch ., try ([[1,"x"]] | from_entries) catch .]
 null
 ["Cannot index number with number (0)","Cannot index array with string (\"key\")"]
+
+# #1149: a preserved literal repr survives tostring/tojson even when f64 cannot
+# hold it — the value printer already kept it, so the two paths now agree
+[1e500, 1e-500, 13911860366432393, 0.1000000000000000000000001 | tostring]
+null
+["1E+500","1E-500","13911860366432393","0.1000000000000000000000001"]
+
+# #1149: the same repr reaches @csv / @tsv / @text / @json, which share the writer
+[([1e500] | @csv), ([1e500] | @tsv), ([1e500] | @json), (1e500 | @text)]
+null
+["1E+500","1E+500","[1E+500]","1E+500"]
+
+# #1149: arithmetic still collapses to f64 — the repr is dropped the moment a
+# value is computed, so overflow saturates to the clamped max double
+[(1e500 + 0 | tostring), (13911860366432393 - 10 | tostring)]
+null
+["1.7976931348623157e+308","13911860366432382"]
+
+# #1149: values with no repr keep the canonical f64 writer (nan -> null,
+# infinite -> clamped max double)
+[(nan | tostring), (infinite | tostring), (-infinite | tostring)]
+null
+["null","1.7976931348623157e+308","-1.7976931348623157e+308"]

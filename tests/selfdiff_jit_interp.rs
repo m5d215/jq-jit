@@ -157,22 +157,12 @@ fn normalize(output: &str) -> String {
 /// rationale, which is the point: the allowlist is the audit trail of "we
 /// know about this, here's why we haven't fixed it yet."
 ///
-/// Current entries (#323):
-/// - `tojson` on numbers that overflow `f64` (`1e1000` → `±INFINITY`):
-///   the raw-byte fast path on stdin lexes the digits and emits the
-///   canonicalised literal (`"1E+1000"`); the interpreter routes through
-///   `Value::Num(f64, repr)` and `push_jq_number_str` saturates non-finite
-///   values to `±1.7976931348623157e+308`. Plumbing the original `repr`
-///   through `value_to_json_tojson` is the obvious local fix, but doing so
-///   without also flipping `have_decnum` to `true` breaks the upstream
-///   `tests/official/jq.test` decnum consistency check (#443). Tracked
-///   in #415.
-const KNOWN_DIVERGENCES: &[(&str, &str)] = &[
-    ("tojson", "1e1000"),
-    ("tojson", "[1.5e-10, 1e1000, 17.5]"),
-    ("tojson", r#"{"a": 1.5e-10, "b": 1e1000}"#),
-    ("tojson", "-1e1000"),
-];
+/// Currently empty (#1149). The last entries were `tojson` on literals that
+/// overflow `f64` (`1e1000`): the raw-byte fast path lexed the digits and
+/// emitted the canonical literal while the interpreter saturated to
+/// `±1.7976931348623157e+308`. Both paths now keep the preserved repr, so the
+/// two agree — and they agree with jq 1.8.2 as well.
+const KNOWN_DIVERGENCES: &[(&str, &str)] = &[];
 
 /// Index of the allowlist entry matching this case's content, if any.
 fn known_divergence_idx(case: &Case) -> Option<usize> {

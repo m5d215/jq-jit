@@ -420,6 +420,40 @@ JIT にまで降りる filter はここ。`flatten_scalar` / `flatten_gen` の m
 
 ## 3. 守るべき invariant
 
+### 数値の literal repr — 出力は decnum 互換、比較・算術は f64
+
+`Value::Num(f64, NumRepr)` の第 2 フィールドは parse 時の literal を保持する。
+**repr を持つ値は、f64 で表現できるかに関係なく、常に repr を canonical 形で
+出力する**（#1149）。`1e500` が `1E+500`、`13911860366432393` が丸められずに
+そのまま出るのはこれ。jq の decNumber が literal を保持するのと同じ挙動。
+
+出力経路は 2 系統あり、**両者は同じルールでなければならない**:
+
+- value printer — `write_value_compact_ext_inner` と固定バッファ writer。
+  `canonical_repr_bytes(repr)` を無条件に使う
+- 文字列化 writer — `num_repr_text` を共有する `tostring` / `tojson` /
+  `@csv` / `@tsv` / `@json` / `@text`
+
+#1149 以前は後者だけが「f64 に厳密に載るか」で gate していたため、
+`1e500` は `1E+500` と印字されるのに `1e500 | tostring` は
+`"1.7976931348623157e+308"` になっていた。gate を足す変更は同じ穴を再発させる。
+
+repr が落ちるのは **値が計算された時だけ**。算術・比較の結果は
+`Value::number(n)`（repr なし）になり、canonical f64 writer に乗る。
+したがって:
+
+- `1e500 + 0` → 飽和して `1.7976931348623157e+308`
+- `13911860366432393 == 13911860366432392` → `true`（jq decnum は `false`）
+
+**`have_decnum` は `false` のまま**にする。出力側は decnum 互換だが、比較・算術は
+f64 のままで、そちらは decimal backend 無しには埋められない。`false` は後者に
+対する正直な答えで、過小申告する側に倒している。`tests/official/jq.test` の
+decnum 分岐行のうち出力系 5 行は、この理由で jq-jit ローカルの期待値に pin
+してある（実 jq 1.8.2 で検証済み）。
+
+既知の残ギャップ: 入力値への単項マイナス（`-.`）は repr を落とす。jq は
+literal の符号を反転して精度を保つ。#1149 のスコープ外。
+
 ### オブジェクト重複キーの dedup
 
 jq は `{a:1, a:2}` → `{"a":2}`（後勝ち、最初の位置を保持）。
