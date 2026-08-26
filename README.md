@@ -19,7 +19,7 @@ A JIT-compiling [jq](https://jqlang.github.io/jq/) in Rust using [Cranelift](htt
 
 A few divergences from jq are deliberate engineering tradeoffs rather than bugs:
 
-- **Number representation** — values are IEEE 754 doubles throughout (there is no decimal-number backend), so integers beyond 2^53 and out-of-range literals such as `1e1000` lose precision or saturate where jq's optional decimal build (`have_decnum`) would preserve them — including through `tojson`/`fromjson` round-trips.
+- **Number representation** — values are IEEE 754 doubles throughout (there is no decimal-number backend). A number that is only *carried and printed* keeps its original literal, so `1e1000`, `13911860366432393` and friends survive `tostring` / `tojson` / `fromjson` round-trips and the `@csv` / `@tsv` / `@text` formatters exactly as jq's decimal build prints them. The moment a value is *computed* — arithmetic, or a comparison — it collapses to the nearest double, so `1e1000 + 0` saturates and `13911860366432393 == 13911860366432392` is `true` where jq's optional decimal build (`have_decnum`) says `false`. `have_decnum` therefore reports `false`: it is the honest answer for the comparison and arithmetic side.
 - **Regex anchors** — the regex engine is the linear-time Rust [`regex`](https://docs.rs/regex) crate (no lookaround or backtracking, which is what keeps matching ReDoS-resistant). As a result `$` matches only end-of-text, not also just before a trailing newline as jq's Oniguruma does; `^` is likewise start-of-text only.
 
 ## Performance

@@ -4331,3 +4331,15 @@ null
 # jq 1.8.2 alignment (#1144): truncate_stream on a scalar dumps the .[0] key
 try truncate_stream(5) catch .
 null
+
+# #1149: tostring/tojson keep the preserved literal repr (jq decnum parity)
+[(1e500, 1e-500, 13911860366432393, 0.1000000000000000000000001, 9999999999999999 | tostring), (1e500 | tojson)]
+null
+
+# #1149: the shared repr writer also backs @csv / @tsv / @json / @text
+[([1e500, 13911860366432393] | @csv), ([1e500, 13911860366432393] | @tsv), ([1e500] | @json), (1e500 | @text)]
+null
+
+# #1149: computed values still take the f64 writer (repr dropped by arithmetic)
+[(1e500 + 0), (13911860366432393 - 10), (1e500 | tostring | length)]
+null

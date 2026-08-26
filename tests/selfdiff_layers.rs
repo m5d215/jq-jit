@@ -219,12 +219,7 @@ fn normalize(output: &str) -> String {
 /// Entries are keyed by `(filter, input)` content — not
 /// `tests/regression.test` line numbers — so the corpus can be edited
 /// anywhere without renumbering the allowlist (#1026).
-const KNOWN_DIVERGENCES: &[(&str, &str)] = &[
-    ("tojson", "1e1000"),
-    ("tojson", "[1.5e-10, 1e1000, 17.5]"),
-    ("tojson", r#"{"a": 1.5e-10, "b": 1e1000}"#),
-    ("tojson", "-1e1000"),
-];
+const KNOWN_DIVERGENCES: &[(&str, &str)] = &[];
 
 /// Index of the allowlist entry matching this case's content, if any.
 fn known_divergence_idx(case: &Case) -> Option<usize> {

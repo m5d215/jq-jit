@@ -4,7 +4,7 @@
 //! compile-time syntax errors (exit 3), which the diff/regression harnesses
 //! skip, so assert acceptance/rejection at the process level here.
 
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::process::{Command, Stdio};
 
 /// Returns true if jq-jit *compiled* the program (it may still fail at
@@ -20,7 +20,17 @@ fn accepts(filter: &str) -> bool {
         .stderr(Stdio::null())
         .spawn()
         .expect("failed to spawn jq-jit");
-    child.stdin.take().unwrap().write_all(b"[1,2]").unwrap();
+    // Every rejected pattern is a *compile* error, so jq-jit exits (code 3)
+    // without ever reading stdin. Whether this write lands before the child is
+    // gone is a race that a loaded CI runner loses, and `EPIPE` there is the
+    // expected outcome rather than a failure — only the exit code decides.
+    let mut stdin = child.stdin.take().expect("stdin was piped");
+    match stdin.write_all(b"[1,2]") {
+        Ok(()) => {}
+        Err(e) if e.kind() == ErrorKind::BrokenPipe => {}
+        Err(e) => panic!("failed to write jq-jit stdin: {e}"),
+    }
+    drop(stdin);
     let code = child.wait_with_output().expect("wait failed").status.code();
     code != Some(3)
 }

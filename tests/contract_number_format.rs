@@ -131,8 +131,9 @@ fn render_repr_all(n: f64, repr: Option<&str>) -> (String, String) {
 #[test]
 fn repr_preserving_corpus_pins() {
     // (n, repr, expected) — jq's literal-preserving canonical form (#475,
-    // #457, #616): exact reprs keep their shape in uppercase-E decnum style;
-    // non-roundtripping reprs fall back to the computed-f64 form.
+    // #457, #616, #1149): a preserved repr always keeps its shape in
+    // uppercase-E decnum style, including literals f64 cannot hold exactly.
+    // Only a value with no repr at all takes the computed-f64 form.
     let cases: &[(f64, Option<&str>, &str)] = &[
         (1.0, Some("1.0"), "1.0"),
         (1.0, Some("1.00"), "1.00"),
@@ -142,8 +143,16 @@ fn repr_preserving_corpus_pins() {
         (1e-5, Some("1e-5"), "0.00001"),
         (5e-324, Some("5e-324"), "5E-324"), // #616: smallest subnormal
         (f64::MAX, Some("1.7976931348623157e308"), "1.7976931348623157E+308"),
-        // 16 significant digits: not exactly representable, repr dropped.
-        (13911860366432393u64 as f64, Some("13911860366432393"), "13911860366432392"),
+        // 16+ significant digits: f64 cannot hold these exactly, but the
+        // preserved repr still wins — matching jq 1.8.2's decnum output (#1149).
+        (13911860366432393u64 as f64, Some("13911860366432393"), "13911860366432393"),
+        (f64::INFINITY, Some("1e500"), "1E+500"), // literal overflows f64
+        (0.0, Some("1e-500"), "1E-500"),          // literal underflows f64
+        (
+            0.1000000000000000000000001,
+            Some("0.1000000000000000000000001"),
+            "0.1000000000000000000000001",
+        ),
         (1.5, None, "1.5"),
         (-0.0, None, "-0"),
     ];
@@ -161,11 +170,10 @@ fn repr_preserving_corpus_pins() {
 }
 
 /// #1077: `num_repr_text` short-circuits plain short decimal lexemes with a
-/// single scan instead of the three full checks (validity / exactness /
-/// normalization). Pin the boundary shapes on both sides of the gate so the
-/// fast path can never drift from the semantics it replaces — every
-/// expected value below was cross-checked against jq 1.8.1 (the 16-digit
-/// integer is the known no-decnum fallback, #236/#415).
+/// single scan instead of the full checks (validity / normalization). Pin the
+/// boundary shapes on both sides of the gate so the fast path can never drift
+/// from the semantics it replaces — every expected value below was
+/// cross-checked against jq 1.8.2.
 #[test]
 fn short_canonical_plain_fast_path_boundary_pins() {
     let cases: &[(&str, &str)] = &[
@@ -185,7 +193,11 @@ fn short_canonical_plain_fast_path_boundary_pins() {
         ("0.0000001", "1E-7"),      // #611 normalization
         ("-0.0000001", "-1E-7"),
         ("1e3", "1E+3"),            // exponent → canonical uppercase-E form
-        ("9999999999999999", "1e+16"), // 16 digits → repr dropped, f64 form
+        // 16 digits: past the fast path's 15-digit cap, so the full checks
+        // run — and they keep the repr rather than collapsing to `1e+16` (#1149).
+        ("9999999999999999", "9999999999999999"),
+        ("1e500", "1E+500"),   // beyond f64 range, repr still wins
+        ("1e-500", "1E-500"),
     ];
     for &(lexeme, expected) in cases {
         let n: f64 = lexeme.parse().expect("test lexeme parses");
