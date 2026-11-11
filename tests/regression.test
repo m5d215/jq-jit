@@ -8492,6 +8492,12 @@ lgamma_r
 -1
 [1.7976931348623157e+308,1]
 
+# lgamma_r sign at negative-integer poles must not depend on the host libm
+# (newer glibc on Ubuntu 26.04 returns sign=-1 here)
+lgamma_r
+-2
+[1.7976931348623157e+308,1]
+
 # Issue #531: todate on null uses jq's strftime/1 wording
 try todate catch .
 null
