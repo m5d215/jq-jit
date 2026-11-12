@@ -4,7 +4,7 @@
 //! byte offsets and line numbers. Comment-only scope — no trailing commas or
 //! other JSON5. Default behavior (flag off) is unchanged.
 
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::process::{Command, Stdio};
 
 use jq_jit::value::strip_json_comments;
@@ -18,12 +18,18 @@ fn run_stdin(args: &[&str], input: &str) -> (String, String, Option<i32>) {
         .stderr(Stdio::piped())
         .spawn()
         .expect("failed to spawn jq-jit");
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(input.as_bytes())
-        .unwrap();
+    // Some cases (e.g. `--jsonc --unbuffered`) are rejected at argument
+    // validation, so jq-jit exits (code 2) without ever reading stdin. Whether
+    // this write lands before the child is gone is a race, and `EPIPE` there is
+    // the expected outcome rather than a failure — the exit code and stderr
+    // decide the verdict.
+    let mut stdin = child.stdin.take().expect("stdin was piped");
+    match stdin.write_all(input.as_bytes()) {
+        Ok(()) => {}
+        Err(e) if e.kind() == ErrorKind::BrokenPipe => {}
+        Err(e) => panic!("failed to write jq-jit stdin: {e}"),
+    }
+    drop(stdin);
     let out = child.wait_with_output().unwrap();
     (
         String::from_utf8_lossy(&out.stdout).to_string(),
