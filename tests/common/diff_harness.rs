@@ -44,6 +44,44 @@ pub fn run_script_file(
     )
 }
 
+/// Per-child virtual address-space cap (Linux only).
+///
+/// A non-terminating filter that accumulates (e.g. `[recurse(f)]` where `f`
+/// is a fixpoint) makes jq-jit allocate at ~2 GB/s until the harness timeout
+/// fires. With `par_map` running one case per core, a few of those at once
+/// exhausted the 16 GB GitHub-hosted Ubuntu runner and the OOM took the
+/// runner agent down with it ("lost communication with the server"). Capping
+/// the address space turns that into a prompt allocation failure in the
+/// child — reported as an error, which is what a runaway case is anyway.
+///
+/// The cap has to clear jq-jit's 2 GiB main-thread stack reservation
+/// (`src/bin/jq-jit.rs`); 4 GiB leaves ~2 GiB of heap per child, so even one
+/// runaway per core stays well inside the runner's RAM.
+#[cfg(target_os = "linux")]
+const CHILD_ADDRESS_SPACE_LIMIT: libc::rlim_t = 4 * 1024 * 1024 * 1024;
+
+#[cfg(target_os = "linux")]
+fn cap_address_space(cmd: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: the closure runs in the forked child before exec and only
+    // calls `setrlimit`, which is async-signal-safe.
+    unsafe {
+        cmd.pre_exec(|| {
+            let lim = libc::rlimit {
+                rlim_cur: CHILD_ADDRESS_SPACE_LIMIT,
+                rlim_max: CHILD_ADDRESS_SPACE_LIMIT,
+            };
+            if libc::setrlimit(libc::RLIMIT_AS, &lim) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn cap_address_space(_cmd: &mut Command) {}
+
 fn run_with_args<I, S>(bin: &str, args: I, stdin: &str, timeout: Duration) -> Option<RunOutput>
 where
     I: IntoIterator<Item = S>,
@@ -54,6 +92,7 @@ where
     cmd.stdin(std::process::Stdio::piped());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
+    cap_address_space(&mut cmd);
 
     let mut child = cmd.spawn().ok()?;
     {
