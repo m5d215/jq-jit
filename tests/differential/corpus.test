@@ -1581,7 +1581,7 @@ null
 {"a":{"b":{"c":1}}}
 
 [recurse(.a?)]
-{"a":{"a":{"a":null}}}
+{"a":{"a":1}}
 
 # ---------- Issue #65 parser coverage: path function ----------
 
